@@ -33,3 +33,6 @@ secrets.json
 
 # macOS
 .DS_Store
+
+# Agent worktrees and local tool state
+.claude/
