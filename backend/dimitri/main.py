@@ -114,7 +114,7 @@ def create_app(home: Path | None = None) -> FastAPI:
 
     @app.get("/api/status", response_model=StatusResponse)
     def status() -> StatusResponse:
-        entries, sources = state.catalog.entries()
+        sources = state.catalog.sources()
         return StatusResponse(
             status="ok",
             version=APP_VERSION,
@@ -123,7 +123,7 @@ def create_app(home: Path | None = None) -> FastAPI:
             backend_url=f"http://127.0.0.1:{DEFAULT_PORT}",
             storage=state.storage(),
             lm_studio=lm_studio_status(state.settings.lms_base_url),
-            runners=[RunnerStatusModel(**s.model_dump()) for s in state.registry.statuses()],
+            runners=state.registry.statuses(),
             active_jobs=len([j for j in state.store.list() if j.status in ("queued", "running")]),
             bio_rodeo=sources.get("bio_rodeo", {}),
         )

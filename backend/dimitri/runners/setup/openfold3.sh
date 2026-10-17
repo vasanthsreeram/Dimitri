@@ -24,7 +24,9 @@ uv pip install --python .venv/bin/python -e .
 mkdir -p "$CACHE"
 if [ ! -f "$CACHE/ckpt_root" ]; then
   echo "Downloading OpenFold3 parameters into $CACHE"
+  export PATH="$PWD/.venv/bin:$PATH"
   bash openfold3/scripts/download_openfold3_params.sh --download_dir="$CACHE"
+  printf '%s' "$CACHE" > "$CACHE/ckpt_root"
 fi
 
 echo "OpenFold3-MLX setup complete"

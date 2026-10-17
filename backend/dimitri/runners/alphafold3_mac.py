@@ -285,13 +285,32 @@ class AlphaFold3MacRunner(Runner):
             raise RunnerError(
                 "AlphaFold 3 finished but wrote no CIF structure. Check the job log."
             )
-        root_cif = next((p for p in cifs if p.parent == out_dir), cifs[0])
+        ranked = [
+            path
+            for path in cifs
+            if "seed-" not in path.name and "sample-" not in path.name
+        ]
+        root_cif = ranked[0] if ranked else cifs[0]
         cif_text = root_cif.read_text(encoding="utf-8", errors="replace")
 
-        summaries = sorted(out_dir.glob("*_summary_confidences.json"))
-        confidences = sorted(out_dir.glob("*_confidences.json"))
-        summary = self._read_json(summaries[0]) if summaries else {}
-        confidence = self._read_json(confidences[0]) if confidences else {}
+        summaries = sorted(out_dir.rglob("*_summary_confidences.json"))
+        confidences = sorted(out_dir.rglob("*_confidences.json"))
+        ranked_summaries = [
+            path
+            for path in summaries
+            if "seed-" not in path.name and "sample-" not in path.name
+        ]
+        ranked_confidences = [
+            path
+            for path in confidences
+            if "seed-" not in path.name and "sample-" not in path.name
+        ]
+        summary = self._read_json((ranked_summaries or summaries)[0]) if summaries else {}
+        confidence = (
+            self._read_json((ranked_confidences or confidences)[0])
+            if confidences
+            else {}
+        )
 
         plddt_values: list[float] = []
         if isinstance(confidence.get("plddt"), list):

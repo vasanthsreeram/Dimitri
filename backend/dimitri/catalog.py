@@ -231,6 +231,7 @@ class CatalogService:
         self.settings = settings
         self.registry = registry
         self.adapter = adapter or BioRodeoAdapter(settings)
+        self._size_cache: dict[str, tuple[float, int]] = {}
 
     def _snapshot(self) -> dict[str, Any]:
         if SNAPSHOT_FILE.exists():
@@ -245,6 +246,34 @@ class CatalogService:
         snapshot = self._snapshot()
         chosen = cached if cached.get("entries") else snapshot
         return chosen, {entry["slug"]: entry for entry in chosen.get("entries", [])}
+
+    def _entry_size(self, entry: dict[str, Any]) -> int:
+        """Disk walk with a short cache; status polling must not rescan every 5s."""
+        key = entry.get("runner_id") or entry["id"]
+        now = time.time()
+        cached = self._size_cache.get(key)
+        if cached and now - cached[0] < 60:
+            return cached[1]
+        size = _entry_size(entry, self.settings)
+        self._size_cache[key] = (now, size)
+        return size
+
+    def sources(self) -> dict[str, Any]:
+        rodeo, records = self.rodeo_records()
+        return {
+            "local": {
+                "file": str(CATALOG_FILE),
+                "entries": len(load_local_catalog()),
+            },
+            "bio_rodeo": {
+                "base_url": self.adapter.base_url,
+                "fetched_at": rodeo.get("fetched_at"),
+                "entries": len(records),
+                "mode": rodeo.get("mode", "snapshot"),
+                "api": None,
+                "note": rodeo.get("note"),
+            },
+        }
 
     def entries(self) -> tuple[list[CatalogEntry], dict[str, Any]]:
         statuses = {status.id: status for status in self.registry.statuses()}
@@ -272,7 +301,7 @@ class CatalogService:
                     installed=bool(status and status.installed),
                     ready=bool(status and status.ready),
                     installable=bool(runner_id),
-                    size_bytes=_entry_size(raw, self.settings),
+                    size_bytes=self._entry_size(raw),
                     weight_note=manifest.weight_note if manifest else raw.get("weight_note"),
                     weight_request_url=manifest.weight_request_url if manifest else None,
                     weight_dir=manifest.weight_dir if manifest else None,

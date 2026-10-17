@@ -149,3 +149,50 @@ def test_lm_studio_status_parses_models(monkeypatch) -> None:
     status = main.lm_studio_status("http://localhost:1234/v1")
     assert status.reachable
     assert status.models == ["qwen3-8b", "llama-3.2"]
+
+
+def test_af3_collect_outputs_prefers_ranked_files(tmp_path: Path) -> None:
+    out = tmp_path / "out" / "job"
+    sample = out / "seed-7_sample-0"
+    sample.mkdir(parents=True)
+    (sample / "job_seed-7_sample-0_model.cif").write_text("data_sample\n")
+    (out / "job_seed-7_sample-0_confidences.json").write_text(
+        '{"plddt": [10.0, 20.0], "pae": [[0.0, 1.0], [1.0, 0.0]]}'
+    )
+    (out / "job_model.cif").write_text("data_ranked\n")
+    (out / "job_summary_confidences.json").write_text(
+        '{"ptm": 0.91, "iptm": 0.77, "ranking_score": 0.9}'
+    )
+    (out / "job_confidences.json").write_text(
+        '{"plddt": [80.0, 90.0], "atom_plddts": [80.0, 85.0, 90.0], '
+        '"pae": [[0.0, 2.0], [2.0, 0.0]]}'
+    )
+    runner = AlphaFold3MacRunner(Settings())
+    result = runner._collect_outputs(out, request("protein", "MK"))
+    assert result.cif_text == "data_ranked\n"
+    assert result.metrics["ptm"] == 0.91
+    assert result.metrics["iptm"] == 0.77
+    assert result.metrics["plddt"] == 85.0
+    assert result.per_residue_plddt == [80.0, 90.0]
+    assert len(result.pae or []) == 2
+
+
+def test_openfold3_collect_outputs_picks_best_sample(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    for sample, score in ((0, 70.0), (1, 88.0)):
+        directory = out / "query" / "seed_7" / f"query_seed_7_sample_{sample}"
+        directory.mkdir(parents=True)
+        (directory / f"query_seed_7_sample_{sample}_model.cif").write_text(
+            f"data_sample_{sample}\n"
+        )
+        (directory / f"query_seed_7_sample_{sample}_confidences_aggregated.json").write_text(
+            '{"avg_plddt": %s, "ptm": 0.8, "plddt": [%s, %s]}'
+            % (score, score, score)
+        )
+    runner = OpenFold3Runner(Settings())
+    result = runner._collect_outputs(
+        out, PredictionRequest(model_id="openfold3", entity_type="protein", sequence="MK")
+    )
+    assert result.cif_text == "data_sample_1\n"
+    assert result.metrics["plddt"] == 88.0
+    assert result.per_residue_plddt == [88.0, 88.0]
