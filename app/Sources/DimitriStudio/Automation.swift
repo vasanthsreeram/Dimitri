@@ -74,6 +74,14 @@ enum Automation {
                     return false
                 }
                 try? await Task.sleep(for: .seconds(1.5))
+            case "open":
+                app.open([URL(fileURLWithPath: argument)])
+                try? await Task.sleep(for: .seconds(3))
+            case "select-model":
+                if let job = app.predictions.first(where: { $0.modelId == argument }) {
+                    app.select(job.id)
+                }
+                try? await Task.sleep(for: .seconds(1.5))
             case "select-latest":
                 if let first = app.predictions.first { app.select(first.id) }
                 try? await Task.sleep(for: .seconds(1.5))

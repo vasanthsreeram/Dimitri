@@ -4,9 +4,8 @@ gemmi does the parsing and writing. Reading a PDB file with gemmi and calling
 ``setup_entities`` gives every chain an entity, a polymer type and label
 sequence numbers, so the mmCIF it writes carries ``_entity``,
 ``_entity_poly`` and ``_struct_asym``. Phase 1 converted with Biopython's
-MMCIFIO, which writes ``label_entity_id ?`` and no entity categories; Mol*
-then could not tell a chain was a polymer and drew loose atoms instead of a
-cartoon.
+MMCIFIO, which writes ``label_entity_id ?``, no entity categories, and splits
+a chain at modified residues, so other programs could misread the polymers.
 
 Runners return either PDB or mmCIF. The store keeps that native text as the
 file the viewer loads and writes the other format with gemmi for export.

@@ -24,8 +24,8 @@ def atom_site_column(cif: str, name: str) -> list[str]:
 
 
 def test_converted_cif_declares_polymer_entities() -> None:
-    """Phase 1's Biopython CIF had label_entity_id '?' and no _entity_poly,
-    so Mol* drew loose atoms. The gemmi CIF must say what the chain is."""
+    """Phase 1's Biopython CIF had label_entity_id '?' and no _entity_poly.
+    The gemmi CIF must say what each chain is."""
     cif = pdb_to_cif(TRP_CAGE)
     assert "_entity_poly.type" in cif and "polypeptide(L)" in cif
     assert "_struct_asym.id" in cif

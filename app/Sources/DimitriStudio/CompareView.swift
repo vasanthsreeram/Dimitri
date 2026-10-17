@@ -124,7 +124,7 @@ struct CompareView: View {
                         Circle().fill(Self.palette[index % Self.palette.count]).frame(width: 10, height: 10).padding(.top, 4)
                         VStack(alignment: .leading, spacing: 3) {
                             Text(app.shortName(for: job.modelId)).font(.callout.weight(.semibold))
-                            Text("pLDDT \(Format.score(job.plddt)) · \(Format.seconds(job.durationS))")
+                            Text(job.isImport ? "Imported structure" : "pLDDT \(Format.score(job.plddt)) · \(Format.seconds(job.durationS))")
                                 .font(.caption.monospacedDigit())
                                 .foregroundStyle(.secondary)
                             if index == 0 {

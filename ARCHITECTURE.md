@@ -1,244 +1,365 @@
 # Architecture
 
-Dimitri Studio is two processes on one Mac:
+Dimitri Studio is a SwiftUI app, a local FastAPI backend that the app starts
+and stops, and one warm worker process per loaded model, each in that model's
+own Python environment.
 
 ```
-┌──────────────────────────────┐        HTTP + SSE         ┌───────────────────────────────┐
-│  SwiftUI app (app/)          │  http://127.0.0.1:8642   │  FastAPI backend (backend/)   │
-│                              │ ───────────────────────▶ │                               │
-│  AppModel (one @MainActor)   │ ◀─────────────────────── │  AppState                     │
-│   ├ Predict                  │      job JSON / events    │   ├ Settings                  │
-│   ├ Results (Mol*, charts)   │                           │   ├ RunnerRegistry            │
-│   ├ Library                  │                           │   ├ JobStore                  │
-│   └ Settings sheet           │                           │   ├ JobManager (one worker)   │
-└──────────────────────────────┘                           │   └ CatalogService            │
-                                                           └───────────────┬───────────────┘
-                                                                           │ subprocess
-                                                           ┌───────────────▼───────────────┐
-                                                           │ AF3 · RhoFold · OpenFold3     │
-                                                           │ checkouts + environments      │
-                                                           └───────────────────────────────┘
+┌───────────────────────────────┐   HTTP + one SSE stream   ┌──────────────────────────────┐
+│ Dimitri Studio.app (SwiftUI)  │   127.0.0.1:8642          │ Backend (FastAPI, uv venv)   │
+│                               │ ────────────────────────▶ │                              │
+│ BackendController ── starts, ─┼─ watches, stops ─────────▶│ AppState                     │
+│ AppModel (@Observable)        │ ◀──────────────────────── │  ├ JobStore (+ versions)     │
+│  ├ Predict                    │  snapshot, then changes   │  ├ JobManager (1 GPU queue)  │
+│  ├ Results ── Mol* (WKWebView)│                           │  ├ RunnerRegistry            │
+│  ├ Library                    │                           │  ├ WorkerPool ───────────────┼──┐
+│  └ Settings / Welcome         │                           │  ├ DeviceProfile, DiskSizer  │  │
+└───────────────────────────────┘                           │  └ CatalogService, LM probe  │  │
+                                                            └──────────────────────────────┘  │
+                         JSON lines on stdin/stdout, one process per loaded model             │
+             ┌───────────────────────────────┬──────────────────────────────────┬─────────────┘
+             ▼                               ▼                                  ▼
+   rhofold_worker.py               af3_worker.py                       (OpenFold3: one
+   rhofold-mac/.venv (PyTorch MPS) alphafold3-mac/.venv (MLX)           process per job)
+   imports rhofold-mac/RhoFold     imports mac-af3 core + streaming
 ```
 
-The backend owns all state and files. The app is a client: it never shells out or
-touches model weights itself.
+The backend owns all state and files. The app never loads weights or runs
+inference; model runtimes never run inside the backend process.
 
 ## Runtime policy
 
-Dimitri is MacBook-only. All inference targets Apple Silicon through Metal:
+MacBook-only: Apple Silicon and Metal. MLX first, PyTorch MPS second, CPU only
+as a reported last resort. No CUDA, no llama.cpp, no GGUF.
 
-| Runner | Runtime | Device | Fallback | Environment |
+| Runner | Runtime | Device | Installed from | Environment |
 |---|---|---|---|---|
-| `alphafold3-mac` | MLX port of AlphaFold 3 | `mlx` | none | `~/.dimitri/models/alphafold3-mac/.venv` |
-| `rhofold` | Upstream RhoFold+ on PyTorch | `mps` | CPU, last resort | `~/.dimitri/models/rhofold/.venv` |
-| `openfold3` | OpenFold3-MLX: MLX kernels on PyTorch | `mps` | none | `~/.dimitri/models/openfold-3-mlx/.venv` |
+| `rhofold` | rhofold-mac (RhoFold+ in PyTorch) | `mps`, CPU fallback | github.com/vasanthsreeram/rhofold-mac, its own `setup.sh` | `<models>/rhofold-mac/.venv` |
+| `alphafold3-mac` | mac-af3 on alphafold3-mac (MLX) | `mlx` | github.com/vasanthsreeram/mac-af3 (private) + omrikais/alphafold3-mac @ 3d1ce7b | `<models>/alphafold3-mac/.venv` |
+| `openfold3` | OpenFold3-MLX (MLX kernels in PyTorch) | `mps` | latent-spacecraft/openfold-3-mlx | `<models>/openfold-3-mlx/.venv` |
 
-There is no CUDA code path, no llama.cpp, and no GGUF. No runner accepts a generic
-`--device cuda` option. MLX is preferred where a port exists; PyTorch MPS is the
-fallback for models without one; CPU is only used if MPS is unavailable, and the
-result's device row and note say so.
-
-The runtime is data, not hardcoded UI: `RunnerManifest` carries `runtime`, `device`
-and `fallback`, and `to_model()` exposes them through `/api/runners` and
-`/api/models`. Each completed job also records the device it actually used
-(`JobResult.device`), which Results displays. The app shows the target runtime in
-Predict and Library.
-
-DeepSeek and other LLMs are not runtimes for structure prediction and are not part
-of the inference stack. The LM Studio probe is a status check only.
-
-## Backend
-
-### AppState and settings
-
-`dimitri/main.py` builds an `AppState` once. It loads `~/.dimitri/settings.json`
-(or `DIMITRI_HOME`), creates the storage directories, then constructs the registry,
-job store, job manager and catalogue. Saving settings rebuilds all four, so runner
-paths change without a restart. Paths must be absolute; this is validated in
-`PUT /api/settings`. Paths must be absolute or `~`-prefixed; both are expanded.
-
-### Job queue
-
-`dimitri/jobs.py` has one worker thread reading a `queue.Queue`. One job at a time
-is deliberate: these models saturate unified memory. A job is an id plus a
-`Runner.run` call; every update rewrites `job.json` atomically (temporary file +
-`os.replace`).
-
-State machine:
-
-```
-queued ──▶ running ──▶ completed
-   │           ├──────▶ failed       (RunnerNotReady / RunnerError / exception)
-   └───────────┴──────▶ cancelled    (control event + SIGTERM to the child)
-```
-
-On startup, `JobStore._load_existing()` reads every `results/jobs/*/job.json` and
-marks jobs left `running`/`queued` as failed, because their worker no longer
-exists.
-
-### Runner contract
-
-`dimitri/runners/base.py` defines a manifest and an abstract class. A runner is
-executable code shipped in this repository that wraps an external model checkout.
-
-```python
-class Runner(ABC):
-    manifest: RunnerManifest
-
-    def status(self, settings) -> RunnerStatusModel: ...
-    def install(self, settings, progress, control) -> InstallResult: ...
-    def run(self, request, workdir, settings, progress, control) -> RunResult: ...
-```
-
-- **Manifest** declares id, display name, entity types, source URL, citation,
-  weight note/request URL/directory, setup hint, and the ordered stage list.
-  The job's initial stages come from this list, so the UI never hardcodes a model's
-  pipeline.
-- **status** is a cheap probe (files and directories only) that reports
-  `installed`, `weights_present`, `ready`, and a human-readable detail.
-- **install** runs the per-runner `setup/*.sh` script through
-  `run_command`, which streams output and honours cancellation.
-- **run** returns a `RunResult`: PDB or CIF text, metrics, per-residue pLDDT, PAE,
-  a note and extra metadata. It may raise `RunnerNotReady` with a hint.
-- **progress(stage_id, fraction, message)** updates the job. Stages before the
-  target are marked done; the target stage gets the fraction. Overall progress is
-  `(stage index + fraction) / stage count`.
-
-`RunnerRegistry` registers the three real runners plus `DemoRunner`. The demo
-runner sets `visible=False`; it appears in tests and never in `/api/runners` or the
-catalogue shown to users.
-
-### Output normalization
-
-`dimitri/export.py` and `JobStore.write_result()` turn a `RunResult` into a fixed
-on-disk contract:
-
-```
-results/jobs/<id>/
-  job.json         # full job incl. stages, log tail, result
-  structure.cif
-  structure.pdb
-  result.json      # normalized confidence JSON (the app's JSON export)
-  confidence.json  # metrics + per-residue pLDDT + PAE
-  work/            # runner scratch: input JSON, raw model output, temp files
-```
-
-If a runner provides only PDB, Biopython writes CIF, and vice versa. Metrics are
-normalized to `{plddt, ptm, iptm}`; a model that does not report a metric returns
-`null`, and the UI shows “—” rather than inventing a value.
-
-### Live updates
-
-`GET /api/jobs/{id}/events` is a `text/event-stream` that polls the in-memory job
-every 250 ms and emits `event: job` only when the serialized job changes, with
-heartbeats. It closes after a terminal status. The app also polls every 5 seconds,
-which covers reconnects, app restarts, and jobs started elsewhere. SSE was chosen
-over WebSockets because the stream is one-way and `URLSession.bytes` consumes it
-with no dependency.
-
-### Catalogue
-
-`dimitri/catalog.py` merges:
-
-1. a curated local list (`catalog/models.json`) that binds a model to a runner and
-   a bio.rodeo slug, and
-2. metadata read from bio.rodeo model pages (name, description, provider, license,
-   openness).
-
-It ships a snapshot built from live requests and can refresh into an on-disk cache.
-The cache is used while it is younger than 24 hours; the shipped snapshot is the
-fallback. There is no bio.rodeo API; the adapter parses schema.org JSON-LD plus two
-visible stat spans. Details and evidence are in
-[docs/BIO_RODEO.md](BIO_RODEO.md).
-
-### Disk usage
-
-`/api/status` walks the models, results and cache directories. Per-model sizes
-combine the runner checkout and its weight directory. `/api/models` exposes the
-sum per catalogue entry.
+Neither rhofold-mac nor mac-af3 is vendored. Dimitri clones them, runs their
+own setup, and imports their code from those checkouts at run time.
 
 ## App
 
-`app/Sources/DimitriStudio/` is one SwiftPM executable target (no external
-dependencies):
+`app/Sources/DimitriStudio/` is one SwiftPM executable target (macOS 14+, no
+third-party Swift packages).
 
 | File | Role |
 |---|---|
-| `DimitriApp.swift` | `@main`, window, activation policy |
-| `RootView.swift` | top bar, three-screen switcher, offline/banner chrome |
-| `PredictView.swift` | model picker, entity picker, sequence, seed/samples, run |
-| `ResultsView.swift` | job list, live stages, metrics, viewer, exports |
-| `LibraryView.swift` | catalogue cards, install progress, disk usage, sources |
-| `SettingsView.swift` | storage/runner paths, backend status, LM Studio status |
-| `Charts.swift` | Canvas pLDDT bars and PAE heatmap |
-| `MolStarView.swift` | `WKWebView` + Mol* UMD build from jsDelivr |
-| `AppModel.swift` | `@MainActor` state, polling, SSE watch, exports, settings |
-| `BackendClient.swift` | typed HTTP client and SSE parser |
-| `Models.swift` | Codable mirror of the API (`convertFromSnakeCase`) |
+| `DimitriApp.swift` | `@main`: one `Window`, a `Settings` scene, menus and keyboard shortcuts, files opened from Finder |
+| `BackendController.swift` | finds, starts, watches and stops the backend; first-launch environment setup with the bundled uv |
+| `AppModel.swift` | `@Observable` state, the event-stream loop, actions, caches (structures, PAE, comparisons) |
+| `BackendClient.swift` | typed HTTP client and the `/api/events` parser |
+| `RootView.swift` | `NavigationSplitView`: sidebar (logo, screens, recent jobs, backend/device footer), start-up states, toasts, window-wide file drop |
+| `PredictView.swift` | input (FASTA paste/drop, entity detection, composition strip), model cards (multi-select), run panel |
+| `ResultsView.swift` | job list, live stage timeline, metrics, Mol* viewer card, charts, run details, export |
+| `CompareView.swift` | superposed overlay, RMSD, per-residue deviation and pLDDT of several models on one input |
+| `LibraryView.swift` | model cards with install progress, weights guidance, loaded-model controls, disk use |
+| `SettingsView.swift`, `OnboardingView.swift` | settings tabs; first-run checklist with a one-click first fold |
+| `Charts.swift` | Swift Charts pLDDT (bands, hover), PAE bitmap heatmap, overlay and deviation charts |
+| `MolStarView.swift`, `Resources/Viewer/` | the structure viewer (below) |
+| `Theme.swift`, `LogoMark.swift`, `Files.swift`, `Automation.swift` | design system, vector logo, FASTA/structure files, scripted snapshots |
 
-`AppModel` polls `/api/status`, `/api/models`, `/api/jobs` and `/api/runners` every
-5 seconds (2 seconds while offline). Submitting a prediction selects the new job
-and opens an SSE watch. Export fetches the file as `Data` and writes it where the
-save panel points.
+### Backend lifecycle
 
-The app decodes only fields it uses; adding a field to a backend response does not
-break the client. `BackendClient` surfaces the backend's `detail` string for
-non-2xx responses.
+`BackendController` probes `127.0.0.1:8642/api/health`. A healthy Dimitri
+0.2 backend (it reports `"app": "dimitri-studio"`) is reused and left running
+on quit. Otherwise the app starts `python -m dimitri --port N --parent-pid
+<app pid>`:
+
+- **In the .app** the backend's source is `Contents/Resources/backend`. On first
+  launch the app runs the bundled `Contents/Helpers/uv` (`uv sync --frozen
+  --no-dev --no-install-project`) to create the environment in
+  `~/Library/Application Support/Dimitri Studio/backend-venv`, outside the
+  signed bundle; a hash of `uv.lock` and the build number decides when to
+  re-sync. Bytecode goes to `~/Library/Caches/Dimitri Studio/pycache`, so
+  nothing inside the bundle ever changes.
+- **From a checkout** (`swift run`) it uses `backend/.venv`, creating it with
+  uv if missing.
+- If something else holds port 8642, it picks a free port.
+- If the backend exits unexpectedly it is restarted (up to three times).
+- On quit it sends SIGTERM and waits up to four seconds. The backend's
+  shutdown stops warm workers. The backend also watches the app's pid and
+  exits if the app dies, and workers exit when their stdin closes.
+
+Output goes to `~/Library/Logs/Dimitri Studio/backend.log` (Help → Show
+Backend Log).
+
+### Live updates
+
+The app opens one `GET /api/events` stream for its whole life. It receives a
+snapshot of every job summary, then only changes: `job` events (summary,
+stages, last log lines) as jobs move, `deleted`, and `runners` when a model is
+loaded, unloaded or installed. Nothing polls except `/api/status` every 30
+seconds (disk, LM Studio, device). Full job records are fetched once a job is
+selected or finishes; PAE matrices, structures and comparisons are fetched on
+demand and cached. The phase 1 app polled four endpoints every five seconds
+and downloaded every result's PAE matrix on each poll.
+
+### Structure viewer
+
+Mol* 5.12.0 (MIT) is bundled in `Resources/Viewer` with Dimitri's own
+`index.html` and `viewer.js`; the viewer needs no network. One
+`MolStarController` (a `WKWebView` plus a `dimitri` script-message bridge)
+lives as long as the app, so switching jobs or screens never reloads Mol*.
+Swift sends structure text and format with `callAsyncJavaScript`; the page
+answers `ready`, `loaded` (atoms, residues, polymer types, secondary
+structure, whether B-factors are usable as confidence) or `error`.
+
+Why phase 1 showed "circular dots": every structure it displayed on this Mac
+came from the demo runner, whose PDB files had atom names one column too far
+left (`ALA` parsed as alternate location `A` plus residue `LA`, no chain). Mol*
+recognised no polymer, and the old page used Mol*'s automatic preset, which
+draws non-polymers as unbonded atoms. The page also depended on a CDN, never
+loaded Mol*'s stylesheet, did not colour by confidence and could not report
+errors; and the Biopython-written mmCIF it loaded has no entity records and
+splits chains at modified residues. Now:
+
+1. the viewer gets the model's **native** text and format
+   (`/api/jobs/{id}/structure`, `X-Structure-Format: pdb|mmcif`);
+2. mmCIF without entity records (alphafold3-mac writes one) gets them added
+   with gemmi, which also writes every exported CIF;
+3. `viewer.js` builds explicit representations: polymer → cartoon (protein and
+   nucleic acids, with computed secondary structure when the file has none),
+   ligands → ball-and-stick, ions small spheres, water hidden. It never falls
+   back to atoms for a polymer, and reports a file with no polymer. Only the
+   first model of an NMR ensemble is shown;
+4. pLDDT colouring reads B-factors with the AlphaFold bands (≥90 #0053D6,
+   70–90 #65CBF3, 50–70 #FFDB13, <50 #FF7D45). Files whose B-factors are not
+   confidence values (all zero, constant, or experimental) are coloured by
+   secondary structure or chain, and the legend says so.
+
+`scripts/viewer-check.sh` compiles the app's `MolStarView.swift` into an
+offscreen harness, blocks all network access, loads a structure and checks the
+rendered image (cartoon present, helix found, pixels in the pLDDT bands).
+
+## Backend lifecycle
+
+`BackendController` probes `127.0.0.1:8642/api/health`. A healthy Dimitri
+0.2 backend (it reports `"app": "dimitri-studio"`) is reused and left running
+on quit. Otherwise the app starts `python -m dimitri --port N --parent-pid
+<app pid>`:
+
+- **In the .app** the backend's source is `Contents/Resources/backend`. On first
+  launch the app runs the bundled `Contents/Helpers/uv` (`uv sync --frozen
+  --no-dev --no-install-project`) to create the environment in
+  `~/Library/Application Support/Dimitri Studio/backend-venv`, outside the
+  signed bundle; a hash of `uv.lock` and the build number decides when to
+  re-sync. Bytecode goes to `~/Library/Caches/Dimitri Studio/pycache`, so
+  nothing inside the bundle ever changes.
+- **From a checkout** (`swift run`) it uses `backend/.venv`, creating it with
+  uv if missing.
+- If something else holds port 8642, it picks a free port.
+- If the backend exits unexpectedly it is restarted (up to three times).
+- On quit it sends SIGTERM and waits up to four seconds. The backend's
+  shutdown stops warm workers. The backend also watches the app's pid and
+  exits if the app dies, and workers exit when their stdin closes.
+
+Output goes to `~/Library/Logs/Dimitri Studio/backend.log` (Help → Show
+Backend Log).
+
+### Live updates
+
+The app opens one `GET /api/events` stream for its whole life. It receives a
+snapshot of every job summary, then only changes: `job` events (summary,
+stages, last log lines) as jobs move, `deleted`, and `runners` when a model is
+loaded, unloaded or installed. Nothing polls except `/api/status` every 30
+seconds (disk, LM Studio, device). Full job records are fetched once a job is
+selected or finishes; PAE matrices, structures and comparisons are fetched on
+demand and cached. The phase 1 app polled four endpoints every five seconds
+and downloaded every result's PAE matrix on each poll.
+
+### Structure viewer
+
+Mol* 5.12.0 (MIT) is bundled in `Resources/Viewer` with Dimitri's own
+`index.html` and `viewer.js`; the viewer needs no network. One
+`MolStarController` (a `WKWebView` plus a `dimitri` script-message bridge)
+lives as long as the app, so switching jobs or screens never reloads Mol*.
+Swift sends structure text and format with `callAsyncJavaScript`; the page
+answers `ready`, `loaded` (atoms, residues, polymer types, secondary
+structure, whether B-factors are usable as confidence) or `error`.
+
+Why phase 1 showed "circular dots": it always passed Mol* a `structure.cif`
+written by Biopython from the model's PDB. That file had
+`_atom_site.label_entity_id ?` and no `_entity`, `_entity_poly` or
+`_struct_asym`, so Mol* could not classify the chain as a polymer and its
+default preset drew loose atoms. Now:
+
+1. the viewer gets the model's **native** text and format
+   (`/api/jobs/{id}/structure`, `X-Structure-Format: pdb|mmcif`);
+2. mmCIF without entity records (alphafold3-mac writes one) gets them added
+   with gemmi, which also writes every exported CIF;
+3. `viewer.js` builds explicit representations: polymer → cartoon (protein and
+   nucleic acids, with computed secondary structure when the file has none),
+   ligands → ball-and-stick, ions small spheres, water hidden. It never falls
+   back to spacefill for a polymer. Only the first model of an NMR ensemble is
+   shown;
+4. pLDDT colouring reads B-factors with the AlphaFold bands (≥90 #0053D6,
+   70–90 #65CBF3, 50–70 #FFDB13, <50 #FF7D45). Files whose B-factors are not
+   confidence values (all zero, constant, or experimental) are coloured by
+   secondary structure or chain, and the legend says so.
+
+## Backend
+
+### Device profile
+
+`dimitri/device.py` reads the chip, unified memory and core counts with
+`sysctl` and sizes three things:
+
+| | 16 GB | 24–36 GB | 48 GB+ |
+|---|---|---|---|
+| GPU budget per model process | RAM − max(4 GB, 20 %) | same | same |
+| MLX buffer cache | 5 % of RAM (0.5–4 GB) | same | same |
+| Keep an idle model loaded | 5 min | 15 min | 30 min |
+| Models loaded at once | 1 | 2 | 3 |
+| AlphaFold 3 (mac-af3) | layer streaming + lean activations | resident weights; lean patches above 640 tokens | resident; lean above 1024 tokens |
+
+Workers apply the budget themselves: `torch.mps.set_per_process_memory_fraction`
+relative to Metal's recommended working set (RhoFold), `mx.set_memory_limit`
+and `mx.set_cache_limit` (AlphaFold 3). A job that does not fit fails with a
+clear out-of-memory message instead of pushing the Mac into heavy swap.
+
+### Warm workers
+
+`dimitri/workers.py`. A `WorkerSpec` is how to launch a runner's worker
+(interpreter, script, environment); a changed spec restarts the worker. The
+`WorkerPool`:
+
+- reuses a ready worker for the next job of the same model;
+- evicts the least recently used idle worker when the profile's limit is
+  reached;
+- stops workers idle longer than the keep-warm time (configurable: device
+  default, 5/15/60 minutes, until quit, or never warm);
+- cancels a job by killing its worker (the next job starts a fresh one);
+- reports state, jobs served, load time and physical footprint
+  (`proc_pid_rusage`) to `/api/workers` and the app.
+
+Protocol (`runners/workers/protocol.py`, standard library only, runs in each
+model's environment):
+
+```
+backend → worker  {"type": "predict", "job": id, "request": {...}, "workdir": path}
+                  {"type": "shutdown"}
+worker → backend  {"type": "ready", "device": "mps", "load_s": 2.1, ...}
+                  {"type": "progress", "stage": "fold", "fraction": 0.4, "message": "Recycle 4/10"}
+                  {"type": "result", "result": {...}}   or   {"type": "error", "message": ..., "hint": ...}
+```
+
+The worker moves the original stdout to a private descriptor and points file
+descriptor 1 at stderr before importing model code, so prints from PyTorch,
+MLX or C extensions cannot corrupt the protocol.
+
+**RhoFold+** (`rhofold_worker.py`) imports rhofold-mac's patched RhoFold from
+`<rhofold-mac>/RhoFold` with `RHOFOLD_FAST=1`, loads the checkpoint once,
+reports each of the 10 recycles from a forward hook on `dist_head` (the last
+module of each recycle), and writes the files rhofold-mac's `run.sh` writes:
+`unrelaxed_model.pdb`, `ss.ct`, `results.npz`, `run_info.json`. pLDDT is
+reported on 0–100. Upstream's PDB writer puts residue *i−1*'s confidence in
+residue *i*'s B-factor; the worker rewrites B-factors from the model output.
+If the worker cannot start, the runner falls back to rhofold-mac's `run.sh`.
+
+**AlphaFold 3** (`af3_worker.py`) adds `alphafold3-mac/src` and mac-af3's
+`core/scripts` and `tracks/weight-streaming/src` to the path, applies
+`mac_af3_patches.apply_pre_build`, `streaming.install` and
+`streaming.build_model` with the profile's configuration, then runs
+alphafold3-mac's `InferenceRunner` per job with recycle, diffusion-step and
+confidence callbacks. Inputs are single-sequence (empty MSAs, no templates).
+Diffusion uses 20 steps for proteins and DNA and AlphaFold 3's reference 200
+for RNA and ligands, following mac-af3's lab notebook.
+
+### Jobs and storage
+
+One `JobManager` thread runs one job at a time (these models fill unified
+memory). Progress updates are applied in place under the store lock, streamed
+immediately and written to disk at most every two seconds or on a stage
+change. Every change bumps a version so the event stream sends only what
+changed.
+
+```
+results/jobs/<id>/
+  job.json          job record (no PAE matrix; it is in confidence.json)
+  structure.pdb     exports; the runner's native one is byte for byte as written,
+  structure.cif     except that a CIF without entity records gets them added
+  result.json       normalized confidence JSON (the JSON export, PAE included)
+  confidence.json   metrics, per-residue pLDDT, PAE
+  work/             runner scratch and raw model output
+```
+
+Imported files (`POST /api/imports`) become completed jobs of kind `import`,
+with the first polymer's sequence, so a prediction and an experimental
+structure of the same sequence can be compared.
+
+`/api/jobs/{a}/compare/{b}` superposes `b` onto `a` with gemmi (sequence
+alignment, Kabsch fit on Cα or P) and returns the RMSD, per-residue distances
+and the moved structure for the overlay.
+
+Directory sizes are computed on a background thread; LM Studio is probed in
+the background every 20 seconds. No request walks the disk or waits on the
+network.
+
+### Runner contract
+
+```python
+class Runner(ABC):
+    manifest: RunnerManifest             # id, names, entity types, stages, runtime, weights note
+    pool: WorkerPool | None              # set by the registry
+
+    def status(self, settings) -> RunnerStatusModel       # files only, cheap
+    def install(self, settings, progress, control) -> InstallResult
+    def run(self, request, workdir, settings, progress, control) -> RunResult
+    def worker_spec(self, settings) -> WorkerSpec | None   # warm-capable runners
+```
 
 ## API
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/health` | Liveness |
-| GET | `/api/status` | Backend, storage, LM Studio, runner statuses, catalogue source |
-| GET/PUT | `/api/settings` | Read/update settings |
-| GET | `/api/runners` | Visible runner manifests |
-| GET | `/api/runners/status` | Status for visible runners |
-| GET | `/api/runners/{id}` | One manifest |
-| GET | `/api/models` | Catalogue with install/ready state and sizes |
+| GET | `/api/health` | Liveness and app identity |
+| GET | `/api/events` | App-wide SSE: snapshot, then job/deleted/runners changes |
+| GET | `/api/status` | Device, storage, LM Studio, runners, loaded workers |
+| GET | `/api/device`, `/api/workers` | Device profile; warm workers |
+| GET/PUT | `/api/settings` | Paths, warm-worker settings |
+| GET | `/api/runners`, `/api/runners/status`, `/api/runners/{id}` | Manifests and status |
+| POST | `/api/runners/{id}/warm`, `/api/runners/{id}/release` | Load a model in the background; unload it |
+| GET | `/api/models` | Catalogue with install state and sizes |
 | POST | `/api/models/{id}/install` | Queue a setup job |
-| POST | `/api/catalog/refresh` | Re-fetch bio.rodeo pages into the cache |
-| GET/POST | `/api/jobs` | List/create prediction jobs |
-| GET/DELETE | `/api/jobs/{id}` | Read/delete a job and its files |
-| POST | `/api/jobs/{id}/cancel` | Cancel a queued or running job |
-| GET | `/api/jobs/{id}/events` | SSE job stream |
+| POST | `/api/catalog/refresh` | Re-read bio.rodeo pages |
+| GET/POST | `/api/jobs` | Job summaries; create a prediction |
+| POST | `/api/jobs/batch` | One input on several models |
+| POST | `/api/imports` | Open a PDB/mmCIF file as a result |
+| GET/DELETE | `/api/jobs/{id}` | Full job; delete with its files |
+| POST | `/api/jobs/{id}/cancel` | Cancel (kills the job's worker) |
+| GET | `/api/jobs/{id}/structure` | Native structure text and format |
+| GET | `/api/jobs/{id}/pae?max=N` | PAE, block-averaged to at most N cells |
+| GET | `/api/jobs/{id}/compare/{other}` | Superposition, RMSD, per-residue distance |
+| GET | `/api/jobs/{id}/events` | Per-job SSE (kept for scripts) |
 | GET | `/api/jobs/{id}/download/{cif,pdb,json}` | Exports |
 
-The server binds only to `127.0.0.1`. There is no authentication because there is
-no remote surface; that would need to change before exposing it on a network.
+The server binds only to 127.0.0.1 and has no authentication; it is not meant
+to be exposed on a network.
 
-## Adding a model
+## Packaging
 
-1. Create `backend/dimitri/runners/<id>.py` with a `RunnerManifest` and the three
-   methods. Shell out to the model's own CLI; do not import heavy frameworks into
-   the backend process.
-2. Add `backend/dimitri/runners/setup/<id>.sh` that clones/installs and reports
-   progress on stdout.
-3. Register the class in `runners/registry.py`.
-4. Add a catalogue entry in `catalog/models.json` with `runner_id` and the
-   bio.rodeo slug.
-5. Add unit tests for input construction and readiness probing.
-
-## Design decisions and trade-offs
-
-- **Subprocess isolation.** Model inference lives in the runner's own Python
-  environment. The backend stays small, and a crashing model cannot take the app
-  down. The cost is slower cold starts and environment drift.
-- **Normalized results.** CIF + PDB + one JSON shape makes the UI simple and keeps
-  results portable. Raw model output is preserved under `work/` but not exposed.
-- **Polling plus SSE.** SSE gives instant stage updates; polling makes restarts and
-  reconnects harmless. Both are cheap because jobs are small JSON objects.
-- **No database.** A directory per job is inspectable, easy to delete, and survives
-  crashes with atomic writes.
-- **Honest unavailable metrics.** RhoFold has no pTM/ipTM/PAE. The cards and charts
-  show that instead of computing a substitute.
-- **The demo runner stays hidden.** It exists to test the pipeline without
-  gigabytes of weights, not to look like a scientific result.
+`scripts/build-app.sh` builds the release executable and assembles
+`dist/Dimitri Studio.app`: Info.plist (bundle id
+`com.vasanthsreeram.dimitristudio`, document types for FASTA, PDB and mmCIF),
+the icon (`app/Bundle`), the viewer resources, the backend source, and uv in
+`Contents/Helpers`. It signs uv and then the app with the Developer ID,
+hardened runtime and a secure timestamp, with an empty entitlements file
+(reasons in the script), and verifies with `codesign --verify --deep
+--strict` and `spctl`. `scripts/notarize.sh` notarizes and staples when a
+notarytool keychain profile exists; `scripts/make-dmg.sh` builds the
+drag-to-Applications disk image.
 
 ## Tests
 
-`backend/tests/` covers the API surface, job lifecycle (including persistence across
-restart and SSE), exports and conversions, catalogue parsing with mock HTTP
-transports, runner readiness and input payloads, and LM Studio parsing. The Swift
-target is verified by `swift build`; the UI was additionally rendered offscreen
-with `NSHostingView` and inspected during development.
+`backend/tests/` (pytest, about 15 s): API, jobs and persistence, the event
+stream, exports and gemmi conversion (including the entity records the
+viewer needs), imports and superposition, the worker pool through a real
+worker process (reuse, cold mode, errors, cancel, load failures, idle and LRU
+eviction), runner status and outputs for rhofold-mac and mac-af3, catalogue
+parsing. `swift build` must stay warning-free. `scripts/viewer-check.sh`
+renders structures with the bundled Mol* offscreen and checks for a cartoon.
+`scripts/bench_runner.py` times real RhoFold+ or AlphaFold 3 jobs cold and warm.

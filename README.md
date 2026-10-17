@@ -1,221 +1,263 @@
-# Dimitri Studio
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.png">
+    <img src="docs/logo.png" alt="Dimitri Studio" width="420">
+  </picture>
+</p>
 
-A simple, local-first Mac app for running protein and RNA structure models. Pick a
-model, paste a sequence, watch the stages, then inspect and export the structure.
-AlphaFold 3 and RhoFold stay on the Mac; OpenFold3's default runner enables its
-ColabFold MSA server, which is the one exception.
+<p align="center"><b>Protein and RNA structure prediction on your Mac.</b><br>
+Pick a model, paste a sequence, watch it fold on the Apple GPU, then inspect, compare and export the structure.<br>
+Your sequences and results never leave the Mac.</p>
 
-This is an early build. It runs, it builds, and the pipeline is tested end to end
-with a synthetic runner. The three real models are integrated against their
-documented interfaces but have not been exercised on this machine because their
-weights and multi-gigabyte environments are not present.
+![Results: a RhoFold+ prediction coloured by pLDDT](docs/screenshots/results.png)
 
-| Area | State |
+## Install
+
+You need a Mac with Apple Silicon (M1 or later) and macOS 14 or later.
+
+1. Download **Dimitri-Studio-0.2.0.dmg**, open it, and drag **Dimitri Studio**
+   to Applications. (To build it yourself, see [Build from source](#build-from-source).)
+2. Open it. The first launch sets up the app's Python environment by itself
+   (about a minute, needs the internet once). No Terminal, Homebrew or Python
+   install is needed: the app carries its own copy of [uv](https://docs.astral.sh/uv/).
+3. The Welcome guide checks Apple's Command Line Tools (one click to install;
+   models need git and a compiler), installs **RhoFold+** with one click
+   (about 1.3 GB including PyTorch), and folds a sample RNA in seconds.
+
+The app is signed with a Developer ID but **not yet notarized**, so the first
+time macOS may say it cannot check it for malicious software. Control-click
+the app, choose **Open**, then **Open** again. (See [Signing](#signing-and-notarization).)
+
+## What it does
+
+- **Predict**: paste a sequence or drop a FASTA file anywhere in the window.
+  Protein, RNA, DNA or ligand is detected from the letters. Pick one model, or
+  several to compare them on the same input. Built-in examples: the 52-nt RNA
+  from PDB 6TB7 and the Trp-cage miniprotein (PDB 1L2Y).
+- **Results**: live stages (RhoFold+ recycles, AlphaFold 3 trunk and diffusion
+  steps), then a 3D cartoon coloured by confidence (pLDDT) with a band legend,
+  per-residue pLDDT with hover read-outs, PAE heatmap, RNA secondary structure
+  (dot-bracket), run details (device, warm or cold start, timings, GPU memory),
+  and export to mmCIF, PDB, JSON or a PNG of the view. Drop a PDB or mmCIF file
+  to open it as a result.
+- **Compare**: results of the same sequence are superposed in one viewer, with
+  RMSD, per-residue deviation and the models' pLDDT side by side. A prediction
+  can be compared with an experimental structure you open.
+- **Library**: install models, see what is loaded and what is on disk.
+- Keyboard: ⌘1/⌘2/⌘3 screens, ⌘N new prediction, ⌘O open, ⌘↩ run, ⌘R run
+  again, ⌘K compare, ⌘. cancel, ⌘⌫ delete, ⌘E/⌥⌘E/⇧⌘E export mmCIF/PDB/JSON,
+  ⇧⌘S save image, ⌘, settings. Light and dark mode; VoiceOver labels; motion
+  follows Reduce Motion.
+
+## Models
+
+| Model | Runtime | Device | Inputs | Confidence |
+|---|---|---|---|---|
+| **RhoFold+** | [rhofold-mac](https://github.com/vasanthsreeram/rhofold-mac) (PyTorch) | Apple GPU (MPS), CPU fallback | RNA | pLDDT, secondary structure |
+| **AlphaFold 3** | [mac-af3](https://github.com/vasanthsreeram/mac-af3) on [alphafold3-mac](https://github.com/omrikais/alphafold3-mac) (MLX) | Apple GPU (MLX) | protein, RNA, DNA, ligand | pLDDT, pTM, ipTM, PAE |
+| OpenFold3-MLX | [openfold-3-mlx](https://github.com/latent-spacecraft/openfold-3-mlx) | MPS | protein, RNA, DNA | pLDDT, pTM, ipTM |
+
+### RhoFold+ (rhofold-mac)
+
+Library → Install clones rhofold-mac and runs its own `./setup.sh` (pinned
+PyTorch, upstream RhoFold at a fixed commit with rhofold-mac's speed patch,
+public weights from Hugging Face checked by SHA-256) and `./doctor.sh`.
+Nothing from it is copied into this repository; its experimental MLX path
+stays off. Single-sequence mode, no Amber relaxation, as in rhofold-mac.
+
+Dimitri keeps the model loaded in a worker process between jobs and writes the
+same files as `./run.sh` (`unrelaxed_model.pdb`, `ss.ct`, `results.npz`,
+`run_info.json`). It reports pLDDT on 0–100 and fixes one upstream quirk:
+RhoFold's PDB writer stores each residue's confidence in the *next* residue's
+B-factor, so Dimitri rewrites the B-factors from the model output.
+
+### AlphaFold 3 (mac-af3)
+
+AlphaFold 3 runs through **mac-af3**, Vas's runtime for frozen AlphaFold 3
+weights on Apple Silicon: a compiled diffusion sampler, 64-token buckets,
+weight streaming and memory patches that let it run on a 16 GB Mac, applied to
+an unmodified alphafold3-mac checkout. Library → Install clones mac-af3 (a
+private repository, so it uses your own GitHub access) and alphafold3-mac at
+the commit mac-af3 pins (3d1ce7b), builds it, and prepares mac-af3's weight
+shards.
+
+**You must supply the AlphaFold 3 weights yourself.** They are not included,
+Dimitri cannot download them, and nothing here redistributes them. mac-af3
+runs on your own copy of the official parameters, `af3.bin.zst`, obtained from
+Google DeepMind under the
+[AlphaFold 3 model parameter terms](https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md).
+Put it in `~/.alphafold3/weights/model/` (or the folder set in Settings). Setup
+checks it against mac-af3's pinned SHA-256
+(`74d02586…1f33ff`) and builds a local streaming cache from it in
+`~/.alphafold3/shards`, which also never leaves your Mac.
+
+Dimitri runs AlphaFold 3 in **single-sequence mode**: no MSA search and no
+templates, so nothing leaves the Mac. Results are less accurate than with an
+MSA, especially for proteins, and each result says so.
+
+### OpenFold3
+
+Unchanged from phase 1. Its default runner enables the ColabFold MSA server,
+so protein sequences are sent to that service; it is the one exception to
+"nothing leaves the Mac".
+
+## Performance
+
+Measured on an Apple M5 MacBook Air (32 GB, macOS 26.6) on 2026-10-17, with
+other apps open (load average about 4). Times are end to end through the job
+API: queueing, the model, structure conversion and writing results.
+
+**RhoFold+, 52-nt RNA (6TB7 chain A)** (`scripts/bench_runner.py`):
+
+| | Per job |
 |---|---|
-| SwiftUI app: Predict, Results, Library, Settings | Working; `swift build` passes |
-| Backend: job queue, live stages (SSE), storage, exports | Working; 59 pytest tests pass |
-| CIF, PDB and JSON export | Working and tested |
-| Mol* 3D viewer | Loads from jsDelivr; verified headlessly. Needs network |
-| bio.rodeo catalogue | Working adapter against live pages; no public API (see below) |
-| LM Studio detection (`localhost:1234/v1`) | Working, status only |
-| AlphaFold 3 runner (`alphafold3-mac`) | Implemented against the upstream CLI; not run (checkout absent; weights are present on this machine) |
-| RhoFold+ runner (PyTorch MPS) | Implemented; setup script and vendored patch present; checkpoint not downloaded |
-| OpenFold3 runner (`openfold-3-mlx`) | Implemented against the upstream CLI; environment not installed |
-| Synthetic demo runner | Working; hidden from users, used by tests |
+| Before: a fresh rhofold-mac process per job (the phase 1 design) | 4.9–5.7 s, median 5.7 s (very first run 12.1 s) |
+| After, first job: starts the warm worker and loads the model (2.1 s) | 4.4 s |
+| After, next jobs: model already loaded | **2.2–2.5 s, median 2.4 s (2.4× faster)** |
 
-![Predict screen](docs/screenshots/predict.png)
+The prediction itself stays about 2.1–2.5 s; the saving is Python start-up,
+importing PyTorch and loading the weights. A loaded RhoFold+ worker holds
+about 2.6 GB.
 
-## Platform and runtime
+**AlphaFold 3, Trp-cage (20 residues), 2 samples × 20 diffusion steps**
+(`scripts/bench_runner.py --model alphafold3-mac --jobs 1 --samples 2`):
 
-Dimitri Studio is **MacBook-only**: Apple Silicon (M1 or later), macOS 14+, Metal
-through MLX or PyTorch MPS. There is no CUDA path, no llama.cpp, and no GGUF.
-Each Python model runtime lives in its own environment; the Swift app never loads
-weights or runs inference itself.
+| | Per job |
+|---|---|
+| Before: stock alphafold3-mac CLI, fresh process, its 256-token bucket (phase 1) | 257 s |
+| mac-af3 runtime, fresh process per job | 37.9 s |
+| mac-af3 warm worker, first job (worker start and 3.9 s model load) | 21.2 s |
+| mac-af3 warm worker, next jobs | **13.6 s** (features 0.2, trunk 10.6, diffusion 2.6) |
 
-| Model | Runtime | Device | Fallback |
-|---|---|---|---|
-| AlphaFold 3 | `alphafold3-mac` MLX port | `mlx` (Metal) | none |
-| RhoFold+ | PyTorch (upstream RhoFold+) | `mps` | CPU, last resort |
-| OpenFold3-MLX | MLX kernels on PyTorch (`mlx_runner.yml`) | `mps` | none |
+Most of the AlphaFold 3 gain is mac-af3's 64-token buckets and compiled
+sampler (trunk 216 s → 11 s); keeping the model and chemical dictionary loaded
+takes a job from 37.9 s to 13.6 s. Mean pLDDT is unchanged (96.8–97.0). The
+stock-CLI figure was measured while other model jobs were running.
 
-MLX is preferred wherever a port exists. PyTorch MPS is the fallback for models
-without an MLX port. CPU is only used when MPS is unavailable; the result's
-**Device** row and note say when that happened.
+Memory: each model process gets a budget of RAM minus max(4 GB, 20 %); MLX's
+buffer cache is capped at 5 % of RAM; models unload after 5/15/30 minutes idle
+(16/32/64 GB Macs), configurable in Settings.
 
-DeepSeek and other language models are not inference engines for these structure
-models, so none is used. LM Studio is detected for status only; there are no LLM
-features.
+## What works, and what does not (yet)
 
-## Requirements
+Verified on this Mac:
 
-- MacBook with Apple Silicon (M1 or later), macOS 14 or later
-- Xcode Command Line Tools (Swift 6)
-- [uv](https://docs.astral.sh/uv/) for the Python backend
-- Network access to install models, refresh the catalogue, and load Mol*
+- The signed app starts and stops its own backend; first-launch environment
+  setup with the bundled uv.
+- RhoFold+ installed through rhofold-mac's setup and doctor; predictions
+  through the app with warm workers; cold fallback through `run.sh`.
+- AlphaFold 3 through mac-af3 and alphafold3-mac (setup script, weights
+  checksum, shards, warm predictions on Trp-cage).
+- The viewer: cartoons for protein (1L2Y, with its helix) and RNA (RhoFold+
+  output in pLDDT bands), offline, checked by rendering
+  (`scripts/viewer-check.sh`) and in the running app.
+- Imports, superposition and comparison; exports; event stream; settings.
+- 80+ backend tests; `swift build` without warnings.
 
-Model sizes and memory differ a lot. Upstream guidance:
+Not done or not verified:
 
-| Model | Weights | Other disk | Notes |
-|---|---|---|---|
-| AlphaFold 3 MLX | ~1 GB (`af3.bin.zst`) | ~3 GB checkout/deps | Upstream recommends a Max/Ultra chip and 36 GB+ unified memory; weights under DeepMind's terms |
-| RhoFold+ | ~508 MB checkpoint | small | Runs on MPS; RNA only |
-| OpenFold3-MLX | several GB | ~10 GB with dependencies | Upstream targets 16 GB+ |
+- **Notarization**: no notarytool keychain profile exists on this Mac, so the
+  app is signed but not notarized ([below](#signing-and-notarization)).
+- **MSAs and templates**: AlphaFold 3 and RhoFold+ run single-sequence only.
+- **One chain per job**: no complexes, protein–ligand pairs, modifications or
+  restraints yet.
+- **OpenFold3** was not installed or run here; it keeps its phase 1 runner
+  (one process per job, no warm worker).
+- AlphaFold 3 on a 16 GB Mac (layer streaming) is configured from mac-af3's
+  measurements but was not run on 16 GB hardware here.
+- LM Studio is detected for status only. There is no chat or language-model
+  feature, by design.
+- bio.rodeo has no API; the catalogue reads its public pages
+  ([notes](docs/BIO_RODEO.md)).
 
-## Install and run
+## Viewer: what was wrong
+
+Structures showed as loose "circular dots". Every structure the phase 1 app had
+displayed on this Mac came from its demo runner, and those PDB files were
+malformed: atom names sat one column too far left, so `ALA` was read as
+alternate location `A` plus residue `LA`, with no chain. Mol* found no polymer,
+and the old page relied on Mol*'s automatic preset, which draws anything that
+is not a polymer as unbonded atoms. The page also loaded Mol* from a CDN (no
+network, no viewer) without its stylesheet, never coloured by confidence,
+reloaded itself for every structure and had no way to report an error. The
+mmCIF it was given came from Biopython, which writes no entity records and
+splits a chain at modified residues (tRNA 1EHZ became 12 fragments).
+
+Now Mol* 5.12.0 is bundled and works offline; the viewer receives each model's
+own file in its own format (PDB or mmCIF); it builds the representations
+itself (cartoon for protein and RNA, with computed secondary structure when the
+file has none; ball-and-stick only for ligands) and never falls back to atoms
+for a polymer; pLDDT uses the AlphaFold bands from the B-factors; files without
+confidence values (experimental or NMR structures) are coloured by secondary
+structure and the legend says so; a file with no recognisable polymer is
+reported as such. Exports are written with gemmi, with entity records and whole
+chains. Checked by rendering 1L2Y (cartoon with its α-helix) and RhoFold+
+output (RNA cartoon in pLDDT bands) offscreen: `scripts/viewer-check.sh`.
+The old phase 1 demo results in an existing `~/.dimitri` still show atoms,
+because their files contain no polymer; delete them from Results.
+
+## Build from source
 
 ```bash
 git clone https://github.com/vasanthsreeram/Dimitri.git
 cd Dimitri
-./scripts/run.sh
+./scripts/run.sh            # builds and opens the app; it starts the backend itself
 ```
 
-`scripts/run.sh` starts the backend on `http://127.0.0.1:8642`, waits for it to be
-healthy, then launches the app with `swift run`. Stopping the app also stops the
-backend it started.
-
-Two-terminal alternative:
+Needs Xcode or the Command Line Tools (Swift 6) and [uv](https://docs.astral.sh/uv/).
+`./scripts/run-backend.sh` runs only the backend on port 8642; the app uses
+an already-running backend and leaves it running.
 
 ```bash
-./scripts/run-backend.sh     # terminal 1
-./scripts/run-app.sh         # terminal 2
+./scripts/test.sh                       # backend tests, swift build, viewer check
+./scripts/build-app.sh --dmg            # signed dist/Dimitri Studio.app and .dmg
+backend/.venv/bin/python scripts/bench_runner.py   # RhoFold+ cold vs warm timings
 ```
 
-First launch creates `~/.dimitri/` with `models/`, `results/` and `cache/`.
-Use the gear button to change those paths.
+### Signing and notarization
 
-## Using it
-
-1. Open **Library** and install a model. Each card says whether the runner is
-   installed and whether its weights were found.
-2. Open **Predict**, pick the model, choose an entity type, paste a sequence, set
-   seed and sample count, and press **Run prediction**.
-3. **Results** shows live stages, then pTM, ipTM, mean pLDDT, a per-residue pLDDT
-   chart, a PAE heatmap and the Mol* viewer. Export CIF, PDB or JSON with a save
-   panel.
-
-Inputs are one entity per job. Complexes, ligand + protein jobs and restraints are
-not implemented yet.
-
-### AlphaFold 3 weights
-
-Dimitri never downloads AlphaFold 3 weights. DeepMind's old request form is now
-closed; it currently publishes the parameters directly:
-
-<https://storage.googleapis.com/alphafold3/af3.bin.zst>
-
-They are governed by the
-[AlphaFold 3 Model Parameters Terms of Use](https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md).
-Place the file in the weights directory shown in the Library and Settings (default
-`~/.alphafold3/weights/model/`). The runner recognises `af3.bin.zst`, `af3.bin`,
-`af3.*.bin.zst` and split `af3.bin.zst.*` shards.
-
-Library → Install clones `omrikais/alphafold3-mac` into
-`~/.dimitri/models/alphafold3-mac` and runs `uv sync`. If the CLI still reports
-missing native tooling, run its interactive `./scripts/install.sh` in that checkout.
-
-### RhoFold+
-
-Library → Install clones `ml4bio/RhoFold`, applies Dimitri's vendored,
-algebraically equivalent MPS speed patch (`RHOFOLD_FAST=1`), creates a Python
-environment with uv, and downloads the public `cuhkaih/rhofold` checkpoint from
-Hugging Face. Attribution and the patch hash are in
-`backend/dimitri/runners/vendor/rhofold/ATTRIBUTION.md`.
-
-The runner uses single-sequence mode (the FASTA also serves as the MSA) and no
-Amber relaxation. RhoFold reports pLDDT only; pTM, ipTM and PAE are shown as not
-reported.
-
-### OpenFold3
-
-Library → Install clones `latent-spacecraft/openfold-3-mlx`, installs it into a uv
-environment, and downloads parameters into `~/.openfold3` (or the path in
-Settings). The upstream `mlx_runner.yml` enables MSA and template search, so those
-runs use the network.
-
-## What works, and what is stubbed
-
-Working and exercised here:
-
-- End-to-end job pipeline with a synthetic runner: validation, stages, SSE, job
-  persistence, restart recovery, cancellation of queued work, exports.
-- All three screens plus the settings sheet; `swift build` passes; screens were
-  rendered offscreen and inspected, and the running app polls the backend.
-- Mol* loading in an offscreen WKWebView: CDN script loaded, CIF parsed, canvas
-  created.
-- bio.rodeo discovery and parsing (see `docs/BIO_RODEO.md`).
-- CIF ↔ PDB conversion via Biopython; normalized confidence JSON.
-- LM Studio `/v1/models` probe with a short timeout.
-
-Not exercised here, and therefore not claimed as working:
-
-- A real AlphaFold 3, RhoFold+ or OpenFold3 prediction. Their environments and
-  weights are not installed in this checkout. The command lines, input JSON and
-  output parsers follow each project's published documentation and are covered by
-  unit tests where possible.
-- Model install jobs that download gigabytes of weights in this build. The setup
-  scripts and progress plumbing exist; only the demo runner was run.
-- The RhoFold patch is vendored from a verified reference project but was not
-  applied in this workspace (the reference is read-only).
-- Playback of very large PAE matrices in the viewer; the heatmap downsamples to
-  about 140 cells per axis.
-
-Known limitations:
-
-- Single entity per job; no complexes, ions, modifications or restraints.
-- One worker, one job at a time. This protects unified memory.
-- No database; jobs are JSON directories under `~/.dimitri/results/jobs/`.
-- The app is a SwiftPM executable, not a signed/notarized `.app` bundle.
-- Mol* comes from a CDN, so the 3D tab needs a network connection. Export still
-  works offline.
-- The JSON export is Dimitri's normalized confidence file, not each model's full
-  raw output tree.
-- PDB conversion through Biopython may lose non-standard chemistry from a CIF.
-- bio.rodeo has no API; parsing can break when its page markup changes.
-
-## Tests
+`scripts/build-app.sh` signs with "Developer ID Application: Vasanth Sreeram
+(UTSTY3J6NS)", hardened runtime, secure timestamp and an empty entitlements
+file, then runs `codesign --verify --deep --strict` and `spctl`. Gatekeeper
+reports "Unnotarized Developer ID" until Apple notarizes the app. To notarize:
 
 ```bash
-./scripts/test.sh
-```
-
-or separately:
-
-```bash
-cd backend && uv sync --extra dev && .venv/bin/python -m pytest -q
-cd app && swift build
+xcrun notarytool store-credentials dimitri-notary \
+  --apple-id <your Apple ID> --team-id UTSTY3J6NS \
+  --password <app-specific password from appleid.apple.com>
+scripts/notarize.sh                     # notarize and staple the app
+scripts/make-dmg.sh --notarize-profile dimitri-notary
 ```
 
 ## Layout
 
 ```
-app/                     SwiftUI executable (Swift Package)
-backend/                 FastAPI service, uv-managed
-  dimitri/runners/       plugin interface, registry, three runners, setup scripts
-  dimitri/catalog/       local catalogue + shipped bio.rodeo snapshot
-  tests/                 pytest suite
-docs/                    architecture, bio.rodeo notes, UI reference, screenshots
-scripts/                 run.sh (one command), run-backend.sh, run-app.sh, test.sh
+app/                    SwiftUI app (SwiftPM); Bundle/ holds Info.plist, entitlements, icon
+  Sources/DimitriStudio/Resources/Viewer/   bundled Mol* and Dimitri's viewer page
+backend/                FastAPI backend (uv)
+  dimitri/runners/      runners, setup scripts, warm workers (workers/)
+  tests/                pytest suite
+design/                 logo and icon sources (SVG)
+docs/                   bio.rodeo notes, screenshots, logos
+scripts/                run, test, build-app, notarize, make-dmg, icons, viewer check, bench
 ```
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the component and job-flow details, and
-[docs/BIO_RODEO.md](docs/BIO_RODEO.md) for the catalogue evidence and its limits.
 
 ## Privacy
 
-Sequences and structures are stored only on this Mac under `~/.dimitri` and are
-sent to the local backend on `127.0.0.1`. Model setup and catalogue refresh make
-outbound requests to GitHub, Hugging Face, OpenFold and bio.rodeo. OpenFold3's
-default `mlx_runner.yml` enables the ColabFold MSA server, so protein sequences
-are sent to that service unless MSA search is disabled upstream. No analytics.
+Sequences and structures stay under `~/.dimitri` and go only to the local
+backend on 127.0.0.1. Model setup downloads code and public weights from
+GitHub and Hugging Face; the catalogue refresh reads bio.rodeo. OpenFold3's
+default MSA server is the one exception noted above. No analytics.
 
-## Attribution
+## Credits
 
-- AlphaFold 3: Abramson et al., *Nature* 630, 493–500 (2024); MLX port by
-  [omrikais/alphafold3-mac](https://github.com/omrikais/alphafold3-mac),
-  CC-BY-NC-SA 4.0 code, model parameters under DeepMind's terms.
-- RhoFold+: Shen et al., *Nature Methods* 21, 2287–2299 (2024);
-  [ml4bio/RhoFold](https://github.com/ml4bio/RhoFold), Apache-2.0.
-- OpenFold3: AlQuraishi Lab; [latent-spacecraft/openfold-3-mlx](https://github.com/latent-spacecraft/openfold-3-mlx), Apache-2.0.
-- Catalogue metadata: [bio.rodeo](https://bio.rodeo), used as a public reference;
-  Dimitri is not affiliated with it.
-- Mol*: [molstar.org](https://molstar.org), MIT.
+- AlphaFold 3: Abramson et al., *Nature* 630, 493–500 (2024). Runtime:
+  mac-af3 (Vasanth Sreeram) on [alphafold3-mac](https://github.com/omrikais/alphafold3-mac)
+  (CC-BY-NC-SA 4.0). Weights under DeepMind's terms, never distributed here.
+- RhoFold+: Shen et al., *Nature Methods* 21, 2287–2298 (2024),
+  [ml4bio/RhoFold](https://github.com/ml4bio/RhoFold) (Apache-2.0), run through
+  [rhofold-mac](https://github.com/vasanthsreeram/rhofold-mac) (Apache-2.0).
+- OpenFold3: AlQuraishi Lab, [openfold-3-mlx](https://github.com/latent-spacecraft/openfold-3-mlx) (Apache-2.0).
+- [Mol*](https://molstar.org) (MIT), [gemmi](https://gemmi.readthedocs.io) (MPL 2.0),
+  [uv](https://github.com/astral-sh/uv) (MIT/Apache-2.0, bundled in the app).
+- Catalogue metadata: [bio.rodeo](https://bio.rodeo), not affiliated.
