@@ -70,6 +70,17 @@ say()  { printf '\n==> %s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 
+# Mach-O files under Contents/ other than the main executable, deepest first.
+# (A function because bash 3.2 misparses `case` inside a command substitution.)
+nested_macho() {
+  local f
+  find "$CONTENTS" -type f ! -path "$CONTENTS/MacOS/$PRODUCT" -print | while IFS= read -r f; do
+    case "$(file -b "$f")" in
+      *Mach-O*) printf '%s\n' "$f" ;;
+    esac
+  done | awk -F/ '{ print NF "\t" $0 }' | sort -rn | cut -f2-
+}
+
 IDENTITY="${DIMITRI_SIGN_IDENTITY:-$DEFAULT_IDENTITY}"
 SIGN=1
 while [ $# -gt 0 ]; do
@@ -240,11 +251,7 @@ else
   # the bundle, including any under Resources, to carry a Developer ID
   # signature, the hardened runtime and a secure timestamp. Today there are
   # none: the backend is Python source and the viewer is JavaScript.
-  nested="$(find "$CONTENTS" -type f ! -path "$CONTENTS/MacOS/$PRODUCT" -print \
-    | while IFS= read -r f; do
-        case "$(file -b "$f")" in *Mach-O*) printf '%s\n' "$f" ;; esac
-      done \
-    | awk -F/ '{ print NF "\t" $0 }' | sort -rn | cut -f2-)"
+  nested="$(nested_macho)"
   if [ -n "$nested" ]; then
     while IFS= read -r f; do
       echo "Signing nested code: ${f#$APP/}"
