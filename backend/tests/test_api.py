@@ -13,12 +13,16 @@ def test_runners_are_registered_and_demo_is_hidden(client: TestClient) -> None:
     runners = client.get("/api/runners").json()
     ids = {runner["id"] for runner in runners}
     assert ids == {"alphafold3-mac", "rhofold", "openfold3"}
+    by_id = {runner["id"]: runner for runner in runners}
     for runner in runners:
         assert runner["stages"], "every runner must declare its stages"
         assert runner["source_url"].startswith("https://github.com/")
         assert runner["device"] in ("mlx", "mps")
         assert runner["runtime"]
         assert "cuda" not in runner["runtime"].lower()
+    assert by_id["openfold3"]["name"] == "OpenFold3-MLX (MPS)"
+    assert by_id["openfold3"]["device"] == "mps"
+    assert by_id["openfold3"]["runtime"] == "MLX kernels on PyTorch"
 
 
 def test_status_reports_storage_and_lm_studio(client: TestClient) -> None:

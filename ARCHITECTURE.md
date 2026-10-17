@@ -31,7 +31,7 @@ Dimitri is MacBook-only. All inference targets Apple Silicon through Metal:
 |---|---|---|---|---|
 | `alphafold3-mac` | MLX port of AlphaFold 3 | `mlx` | none | `~/.dimitri/models/alphafold3-mac/.venv` |
 | `rhofold` | Upstream RhoFold+ on PyTorch | `mps` | CPU, last resort | `~/.dimitri/models/rhofold/.venv` |
-| `openfold3` | OpenFold3-MLX kernels on PyTorch | `mps` | none | `~/.dimitri/models/openfold-3-mlx/.venv` |
+| `openfold3` | OpenFold3-MLX: MLX kernels on PyTorch | `mps` | none | `~/.dimitri/models/openfold-3-mlx/.venv` |
 
 There is no CUDA code path, no llama.cpp, and no GGUF. No runner accepts a generic
 `--device cuda` option. MLX is preferred where a port exists; PyTorch MPS is the

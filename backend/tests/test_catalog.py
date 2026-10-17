@@ -97,7 +97,8 @@ def test_catalog_entries_merge_bio_rodeo_metadata(tmp_path: Path) -> None:
     assert by_id["alphafold3-mac"].runtime == "MLX (Metal)"
     assert by_id["rhofold"].device == "mps"
     assert by_id["openfold3"].device == "mps"
-    assert by_id["openfold3"].runtime == "OpenFold3-MLX kernels on PyTorch MPS"
+    assert by_id["openfold3"].runtime == "MLX kernels on PyTorch"
+    assert by_id["openfold3"].name == "OpenFold3-MLX"
     assert by_id["rhofold"].source_url.endswith("/models/rhofold-plus")
     assert sources["bio_rodeo"]["api"] is None
 

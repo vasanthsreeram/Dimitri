@@ -37,17 +37,18 @@ RUNNER_YAML = "examples/example_runner_yamls/mlx_runner.yml"
 class OpenFold3Runner(Runner):
     manifest = RunnerManifest(
         id="openfold3",
-        name="OpenFold3 (MLX)",
+        name="OpenFold3-MLX (MPS)",
         short_name="OpenFold3",
         version="0.3.1",
         description=(
-            "The AlQuraishi lab's open reproduction of AlphaFold 3, accelerated with "
-            "MLX on Apple Silicon. Protein, RNA and DNA chains; confidence metrics "
-            "and PAE where the model reports them."
+            "The AlQuraishi lab's open reproduction of AlphaFold 3, using the "
+            "OpenFold3-MLX fork. MLX attention and triangle kernels run inside "
+            "PyTorch on the MPS device. Protein, RNA and DNA chains; confidence "
+            "metrics from its aggregated JSON."
         ),
         entity_types=("protein", "rna", "dna"),
         source_url="https://github.com/latent-spacecraft/openfold-3-mlx",
-        runtime="OpenFold3-MLX kernels on PyTorch MPS",
+        runtime="MLX kernels on PyTorch",
         device="mps",
         fallback=None,
         citation="OpenFold3-preview, AlQuraishi Lab (2025)",

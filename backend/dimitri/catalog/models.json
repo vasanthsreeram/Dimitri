@@ -33,7 +33,7 @@
   },
   {
     "id": "openfold3",
-    "name": "OpenFold3",
+    "name": "OpenFold3-MLX",
     "runner_id": "openfold3",
     "rodeo_slug": "openfold3",
     "provider": "AlQuraishi Lab",

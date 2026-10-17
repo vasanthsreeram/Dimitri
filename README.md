@@ -36,7 +36,7 @@ weights or runs inference itself.
 |---|---|---|---|
 | AlphaFold 3 | `alphafold3-mac` MLX port | `mlx` (Metal) | none |
 | RhoFold+ | PyTorch (upstream RhoFold+) | `mps` | CPU, last resort |
-| OpenFold3 | OpenFold3-MLX kernels (`mlx_runner.yml`) on PyTorch | `mps` | none |
+| OpenFold3-MLX | MLX kernels on PyTorch (`mlx_runner.yml`) | `mps` | none |
 
 MLX is preferred wherever a port exists. PyTorch MPS is the fallback for models
 without an MLX port. CPU is only used when MPS is unavailable; the result's
