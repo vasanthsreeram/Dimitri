@@ -271,10 +271,18 @@ def git_head(repo: Path) -> str | None:
 
 
 def base_env(*paths: Path, extra: dict[str, str] | None = None) -> dict[str, str]:
-    """A small, predictable environment for model processes."""
+    """A small, predictable environment for model processes.
+
+    ``DIMITRI_EXTRA_PATH`` is set by the Mac app to the folder holding the uv it
+    bundles, so setup scripts find uv on a Mac that has never installed it.
+    """
+    bundled = [p for p in os.environ.get("DIMITRI_EXTRA_PATH", "").split(":") if p]
+    home = str(Path.home())
     env = {
         "PATH": ":".join(
-            [str(p) for p in paths] + ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+            [str(p) for p in paths]
+            + bundled
+            + [f"{home}/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
         ),
         "HOME": str(Path.home()),
         "PYTHONUNBUFFERED": "1",
