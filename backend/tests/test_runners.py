@@ -78,20 +78,51 @@ def test_af3_ready_requires_checkout_and_weights(tmp_path: Path) -> None:
     assert status.installed and status.weights_present and status.ready
 
 
-def test_rhofold_ready_requires_checkpoint(tmp_path: Path) -> None:
-    repo = tmp_path / "rhofold"
+def make_rhofold_mac(root: Path, *, weights: bool = True) -> Path:
+    """A fake rhofold-mac checkout with the files the runner checks."""
+    repo = root / "rhofold-mac"
     (repo / ".venv" / "bin").mkdir(parents=True)
-    (repo / "rhofold").mkdir(parents=True)
-    (repo / "inference.py").write_text("")
     (repo / ".venv" / "bin" / "python").write_text("")
-    (repo / "pretrained").mkdir()
+    (repo / "RhoFold" / "rhofold").mkdir(parents=True)
+    (repo / "RhoFold" / "pretrained").mkdir(parents=True)
+    for name in ("setup.sh", "run.sh", "doctor.sh"):
+        (repo / name).write_text("#!/bin/bash\n")
+    if weights:
+        (repo / "RhoFold" / "pretrained" / "RhoFold_pretrained.pt").write_bytes(b"0" * 1_100_000)
+    return repo
+
+
+def test_rhofold_ready_requires_rhofold_mac_and_weights(tmp_path: Path) -> None:
+    repo = make_rhofold_mac(tmp_path, weights=False)
     settings = Settings(home=str(tmp_path / "h"))
     settings.rhofold_repo = str(repo)
     runner = RhoFoldRunner(settings)
-    assert runner.status(settings).installed
-    assert runner.status(settings).ready is False
-    (repo / "pretrained" / "rhofold_pretrained_params.pt").write_bytes(b"0" * 1_100_000)
+    status = runner.status(settings)
+    assert status.installed and not status.ready
+    assert "Weights missing" in status.detail
+    (repo / "RhoFold" / "pretrained" / "RhoFold_pretrained.pt").write_bytes(b"0" * 1_100_000)
     assert runner.status(settings).ready
+
+
+def test_plain_upstream_checkout_is_not_rhofold_mac(tmp_path: Path) -> None:
+    repo = tmp_path / "rhofold"
+    (repo / "rhofold").mkdir(parents=True)
+    (repo / "inference.py").write_text("")
+    settings = Settings(home=str(tmp_path / "h"))
+    settings.rhofold_repo = str(repo)
+    status = RhoFoldRunner(settings).status(settings)
+    assert not status.installed
+    assert "rhofold-mac" in status.detail
+
+
+def test_old_rhofold_default_path_migrates_to_rhofold_mac(tmp_path: Path) -> None:
+    home = tmp_path / "h"
+    home.mkdir()
+    (home / "settings.json").write_text(
+        '{"rhofold_repo": "%s"}' % (home / "models" / "rhofold")
+    )
+    settings = Settings.load(home)
+    assert settings.rhofold_repo.endswith("models/rhofold-mac")
 
 
 def test_openfold3_parameter_root_reads_ckpt_root(tmp_path: Path) -> None:
@@ -109,19 +140,11 @@ def test_openfold3_parameter_root_reads_ckpt_root(tmp_path: Path) -> None:
 
 def test_rhofold_rejects_non_rna(tmp_path: Path) -> None:
     settings = Settings(home=str(tmp_path / "h"))
-    repo = tmp_path / "rhofold"
-    (repo / "rhofold").mkdir(parents=True)
-    (repo / "inference.py").write_text("")
-    (repo / ".venv" / "bin").mkdir(parents=True)
-    (repo / ".venv" / "bin" / "python").write_text("")
-    (repo / "pretrained").mkdir()
-    (repo / "pretrained" / "rhofold_pretrained_params.pt").write_bytes(b"0" * 1_100_000)
-    settings.rhofold_repo = str(repo)
+    settings.rhofold_repo = str(make_rhofold_mac(tmp_path))
     runner = RhoFoldRunner(settings)
-
-    with pytest.raises(RunnerError, match="RNA bases"):
+    with pytest.raises(RunnerError, match="Replace T with U"):
         runner.run(
-            request("rna", "MKT"),
+            request("rna", "GGACUT"),
             tmp_path / "work",
             settings,
             lambda *args: None,
@@ -129,11 +152,64 @@ def test_rhofold_rejects_non_rna(tmp_path: Path) -> None:
         )
 
 
-class _Control:
-    cancelled = False
+def test_rhofold_cold_path_reads_rhofold_mac_outputs(tmp_path: Path) -> None:
+    """Without warm workers the runner calls rhofold-mac's own run.sh."""
+    import numpy as np
 
-    def cancel(self) -> None:
-        pass
+    repo = make_rhofold_mac(tmp_path)
+    # A stand-in run.sh that writes what rhofold-mac's predict.py writes,
+    # including upstream's B-factors shifted by one residue.
+    (repo / "run.sh").write_text(
+        """#!/bin/bash
+out="$2"; mkdir -p "$out"
+echo "RhoFold+ | input.fasta | 3 nt | single-sequence | device=mps | fast=True"
+cat > "$out/unrelaxed_model.pdb" <<PDB
+ATOM      1  P     G 0   1       0.000   0.000   0.000  1.00 30.00           P
+ATOM      2  P     G 0   2       5.900   0.000   0.000  1.00 90.00           P
+ATOM      3  P     C 0   3      11.800   0.000   0.000  1.00 60.00           P
+PDB
+printf '3\n1\tG\t0\t2\t3\t1\n2\tG\t1\t3\t0\t2\n3\tC\t2\t4\t1\t3\n' > "$out/ss.ct"
+echo '{"device": "mps", "model_load_s": 1.1, "predict_s": 2.2, "mean_plddt": 0.6}' > "$out/run_info.json"
+echo "Model load 1.1 s | prediction 2.2 s | mean pLDDT 0.600"
+"""
+    )
+    out = tmp_path / "work" / "rhofold-out"
+    out.mkdir(parents=True)
+    np.savez_compressed(out / "results.npz", plddt=np.array([[0.9, 0.6, 0.3]], dtype=np.float32))
+    settings = Settings(home=str(tmp_path / "h"))
+    settings.rhofold_repo = str(repo)
+    settings.warm_workers = False
+    events: list[tuple] = []
+    result = RhoFoldRunner(settings).run(
+        request("rna", "GGC"),
+        tmp_path / "work",
+        settings,
+        lambda *args: events.append(args),
+        _Control(),
+    )
+    assert result.per_residue_plddt == [90.0, 60.0, 30.0]
+    assert result.metrics["plddt"] == 60.0
+    # B-factors now carry each residue's own pLDDT.
+    bfactors = [float(line[60:66]) for line in result.pdb_text.splitlines() if line.startswith("ATOM")]
+    assert bfactors == [90.0, 60.0, 30.0]
+    assert result.extra["dot_bracket"] == "(.)"
+    assert result.timings["predict_s"] == 2.2
+    assert result.warm is False
+    assert any(stage == "fold" for stage, *_ in events)
+
+
+def test_read_ct_dot_bracket_handles_pseudoknots(tmp_path: Path) -> None:
+    from dimitri.runners.rhofold import read_ct_dot_bracket
+
+    ct = tmp_path / "pk.ct"
+    ct.write_text("6\n1 G 0 2 4 1\n2 G 1 3 5 2\n3 A 2 4 0 3\n4 C 3 5 1 4\n5 C 4 6 2 5\n6 A 5 0 0 6\n")
+    assert read_ct_dot_bracket(ct) == "([.)]."
+
+
+def _Control():
+    from dimitri.runners.base import JobControl
+
+    return JobControl()
 
 
 def test_lm_studio_status_parses_models(monkeypatch) -> None:
