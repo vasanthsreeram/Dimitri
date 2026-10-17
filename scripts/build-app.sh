@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
 # Build a signed "Dimitri Studio.app" from the SwiftPM executable.
 #
-# Usage: scripts/build-app.sh [--identity NAME_OR_SHA1] [--no-sign]
+# Usage: scripts/build-app.sh [--identity NAME_OR_SHA1] [--no-sign] [--dmg]
 #
 #   --identity  codesigning identity. Default: $DIMITRI_SIGN_IDENTITY, else
 #               "Developer ID Application: Vasanth Sreeram (UTSTY3J6NS)".
 #   --no-sign   assemble an unsigned development bundle. It runs on this Mac
 #               (the linker's ad-hoc signature covers the executable) but cannot
 #               be notarized or distributed.
+#   --dmg       also build dist/Dimitri-Studio-<version>.dmg (drag-to-Applications
+#               disk image, signed with the same identity).
 #
 # Produces dist/Dimitri Studio.app (dist/ is git-ignored) and the executable's
 # dSYM next to it. Notarize and staple afterwards with scripts/notarize.sh.
 #
 # Bundle layout:
 #   Contents/MacOS/DimitriStudio     release arm64 executable
+#   Contents/Helpers/uv              Astral's uv (pinned release, SHA-256 checked), re-signed
+#                                    with the Developer ID. The app uses it on first launch to
+#                                    create its Python environment, so users need no Terminal.
 #   Contents/Info.plist              app/Bundle/Info.plist with the version filled in
 #   Contents/PkgInfo
 #   Contents/Resources/AppIcon.icns  app/Bundle/AppIcon.icns, when present
@@ -83,6 +88,9 @@ nested_macho() {
 
 IDENTITY="${DIMITRI_SIGN_IDENTITY:-$DEFAULT_IDENTITY}"
 SIGN=1
+MAKE_DMG=0
+UV_VERSION="0.11.2"
+UV_SHA256="4beaa9550f93ef7f0fc02f7c28c9c48cd61fe30db00f5ac8947e0a425c3fb282"
 while [ $# -gt 0 ]; do
   case "$1" in
     --identity)
@@ -92,6 +100,7 @@ while [ $# -gt 0 ]; do
       ;;
     --identity=*) IDENTITY="${1#*=}"; shift ;;
     --no-sign) SIGN=0; shift ;;
+    --dmg) MAKE_DMG=1; shift ;;
     -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
   esac
@@ -213,6 +222,33 @@ stray="$(find "$BACKEND" \( -name __pycache__ -o -name '*.pyc' -o -name .venv -o
 $stray"
 echo "Backend: $(find "$BACKEND" -type f | wc -l | tr -d ' ') files in ${BACKEND#$DIST/}"
 
+# uv, so first launch can build the backend environment without a terminal.
+# Pinned release, checked against Astral's published SHA-256, cached in dist/.
+UV_CACHE="$DIST/.cache/uv-$UV_VERSION"
+if [ ! -x "$UV_CACHE/uv" ]; then
+  echo "Fetching uv $UV_VERSION (aarch64-apple-darwin)"
+  mkdir -p "$UV_CACHE"
+  curl -fsSL -o "$UV_CACHE/uv.tar.gz" \
+    "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-aarch64-apple-darwin.tar.gz" \
+    || die "could not download uv $UV_VERSION"
+  got="$(shasum -a 256 "$UV_CACHE/uv.tar.gz" | awk '{print $1}')"
+  [ "$got" = "$UV_SHA256" ] || { rm -f "$UV_CACHE/uv.tar.gz"; die "uv download checksum mismatch ($got)"; }
+  tar -xzf "$UV_CACHE/uv.tar.gz" -C "$UV_CACHE" --strip-components 1 uv-aarch64-apple-darwin/uv
+  rm -f "$UV_CACHE/uv.tar.gz"
+fi
+mkdir -p "$CONTENTS/Helpers" "$RESOURCES/Licenses"
+cp -X "$UV_CACHE/uv" "$CONTENTS/Helpers/uv"
+chmod 755 "$CONTENTS/Helpers/uv"
+cat > "$RESOURCES/Licenses/uv.txt" <<UVNOTICE
+uv $UV_VERSION (https://github.com/astral-sh/uv), included unmodified in
+Contents/Helpers/uv and re-signed for this app.
+Copyright (c) Astral Software Inc. Licensed under either of the Apache License,
+Version 2.0 or the MIT license, at your option:
+https://github.com/astral-sh/uv/blob/$UV_VERSION/LICENSE-APACHE
+https://github.com/astral-sh/uv/blob/$UV_VERSION/LICENSE-MIT
+UVNOTICE
+echo "Helpers: uv $UV_VERSION"
+
 # Every file readable by every user, writable only by its owner.
 chmod -R u+rwX,go+rX,go-w "$APP"
 
@@ -248,9 +284,9 @@ if [ "$SIGN" -eq 0 ]; then
 else
   say "Signing with: $IDENTITY"
   # Sign nested code inside out. Notarization requires every Mach-O file in
-  # the bundle, including any under Resources, to carry a Developer ID
-  # signature, the hardened runtime and a secure timestamp. Today there are
-  # none: the backend is Python source and the viewer is JavaScript.
+  # the bundle to carry a Developer ID signature, the hardened runtime and a
+  # secure timestamp. The only one is Contents/Helpers/uv: the backend is
+  # Python source and the viewer is JavaScript.
   nested="$(nested_macho)"
   if [ -n "$nested" ]; then
     while IFS= read -r f; do
@@ -311,11 +347,26 @@ EOF
   fi
 fi
 
+# --- disk image ----------------------------------------------------------------
+DMG=""
+if [ "$MAKE_DMG" -eq 1 ]; then
+  say "Building the disk image"
+  if [ "$SIGN" -eq 1 ]; then
+    "$ROOT/scripts/make-dmg.sh" --identity "$IDENTITY" "$APP"
+    DMG="$DIST/Dimitri-Studio-$VERSION.dmg"
+  else
+    warn "--dmg needs a signed app; skipped"
+  fi
+fi
+
 # --- result ------------------------------------------------------------------
 say "Result"
 echo "App:      $APP"
 echo "Version:  $VERSION (build $BUILD_NUMBER), $ARCHS"
 echo "Size:     $(du -sh "$APP" | cut -f1)"
+if [ -n "$DMG" ]; then
+  echo "DMG:      $DMG ($(du -h "$DMG" | cut -f1))"
+fi
 if [ -d "$DIST/$APP_NAME.app.dSYM" ]; then
   echo "dSYM:     $DIST/$APP_NAME.app.dSYM"
 fi
