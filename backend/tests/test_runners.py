@@ -44,6 +44,7 @@ def test_af3_input_payload_for_each_entity_type() -> None:
 
     dna = runner._input_payload(request("dna", "GGGAAACCC"))
     assert dna["sequences"][0]["dna"]["sequence"] == "GGGAAACCC"
+    assert "unpairedMsa" not in dna["sequences"][0]["dna"]
 
     ccd = runner._input_payload(request("ligand", "ATP"))
     assert ccd["sequences"][0]["ligand"]["ccdCodes"] == ["ATP"]
@@ -177,22 +178,76 @@ def test_af3_collect_outputs_prefers_ranked_files(tmp_path: Path) -> None:
     assert len(result.pae or []) == 2
 
 
-def test_openfold3_collect_outputs_picks_best_sample(tmp_path: Path) -> None:
+CIF_WITH_BFACTORS = """\
+data_x
+loop_
+_atom_site.group_PDB
+_atom_site.id
+_atom_site.label_atom_id
+_atom_site.label_comp_id
+_atom_site.auth_asym_id
+_atom_site.auth_seq_id
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+_atom_site.B_iso_or_equiv
+ATOM 1 N ALA A 1 0.0 0.0 0.0 80.0
+ATOM 2 CA ALA A 1 1.0 0.0 0.0 90.0
+ATOM 3 N GLY A 2 2.0 0.0 0.0 50.0
+ATOM 4 CA GLY A 2 3.0 0.0 0.0 70.0
+#
+"""
+
+
+def test_openfold3_collect_outputs_reads_full_confidence_and_cif(tmp_path: Path) -> None:
     out = tmp_path / "out"
-    for sample, score in ((0, 70.0), (1, 88.0)):
-        directory = out / "query" / "seed_7" / f"query_seed_7_sample_{sample}"
-        directory.mkdir(parents=True)
-        (directory / f"query_seed_7_sample_{sample}_model.cif").write_text(
-            f"data_sample_{sample}\n"
-        )
-        (directory / f"query_seed_7_sample_{sample}_confidences_aggregated.json").write_text(
-            '{"avg_plddt": %s, "ptm": 0.8, "plddt": [%s, %s]}'
-            % (score, score, score)
-        )
+    directory = out / "query" / "seed_7" / "query_seed_7_sample_1"
+    directory.mkdir(parents=True)
+    (directory / "query_seed_7_sample_1_model.cif").write_text(CIF_WITH_BFACTORS)
+    (directory / "query_seed_7_sample_1_confidences_aggregated.json").write_text(
+        '{"avg_plddt": 88.0, "ptm": 0.8, "iptm": 0.7}'
+    )
+    (directory / "query_seed_7_sample_1_confidences.json").write_text(
+        '{"plddt": [80.0, 90.0, 50.0, 70.0], "pde": [[0.0]]}'
+    )
     runner = OpenFold3Runner(Settings())
     result = runner._collect_outputs(
         out, PredictionRequest(model_id="openfold3", entity_type="protein", sequence="MK")
     )
-    assert result.cif_text == "data_sample_1\n"
     assert result.metrics["plddt"] == 88.0
-    assert result.per_residue_plddt == [88.0, 88.0]
+    assert result.metrics["ptm"] == 0.8
+    assert result.per_residue_plddt == [85.0, 60.0]
+    assert result.pae is None
+    assert result.device == "mps"
+
+
+def test_af3_collect_outputs_reads_mlx_confidence_scores(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "structure_rank_1.cif").write_text("data_rank1\n")
+    (out / "structure_rank_2.cif").write_text("data_rank2\n")
+    (out / "confidence_scores.json").write_text(
+        '{"num_samples": 2, "ranking_metric": "plddt", "samples": {'
+        '"0": {"plddt": [70.0, 75.0], "pae": [[0.0, 1.0], [1.0, 0.0]], '
+        '"ptm": 0.7, "iptm": 0.6, "mean_plddt": 72.5, "rank": 2}, '
+        '"1": {"plddt": [81.0, 91.0], "pae": [[0.0, 2.0], [2.0, 0.0]], '
+        '"ptm": 0.9, "iptm": 0.8, "mean_plddt": 86.0, "rank": 1}}}'
+    )
+    runner = AlphaFold3MacRunner(Settings())
+    result = runner._collect_outputs(out, request("protein", "MK"))
+    assert result.cif_text == "data_rank1\n"
+    assert result.metrics == {"plddt": 86.0, "ptm": 0.9, "iptm": 0.8}
+    assert result.per_residue_plddt == [81.0, 91.0]
+    assert result.device == "mlx"
+
+
+def test_demo_pdb_handles_three_digit_coordinates() -> None:
+    from dimitri.export import ensure_exports
+    from dimitri.runners.demo import DemoRunner
+
+    coords, plddt = DemoRunner._backbone("protein", 300, 7)
+    pdb = DemoRunner._pdb("protein", 300, coords, plddt)
+    parsed_pdb, cif, stats = ensure_exports(pdb, None)
+    assert "Invalid or missing coordinate" not in parsed_pdb
+    assert stats.atoms == 300
+    assert "_atom_site" in cif

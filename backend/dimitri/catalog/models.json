@@ -6,8 +6,16 @@
     "rodeo_slug": "alphafold-3",
     "provider": "Google DeepMind",
     "description": "All-atom structure prediction for proteins, nucleic acids and ligands on Apple Silicon.",
-    "tags": ["protein", "RNA", "DNA", "ligand", "complexes", "PAE"],
-    "license": "Apache-2.0 (code)"
+    "tags": [
+      "protein",
+      "RNA",
+      "DNA",
+      "ligand",
+      "complexes",
+      "PAE",
+      "MLX"
+    ],
+    "license": "CC-BY-NC-SA 4.0 (code)"
   },
   {
     "id": "rhofold",
@@ -16,7 +24,11 @@
     "rodeo_slug": "rhofold-plus",
     "provider": "CUHK Shen Lab",
     "description": "RNA-only 3D structure prediction with a language-model-based deep learning approach.",
-    "tags": ["RNA", "pLDDT"],
+    "tags": [
+      "RNA",
+      "pLDDT",
+      "MPS"
+    ],
     "license": "Apache-2.0"
   },
   {
@@ -26,7 +38,13 @@
     "rodeo_slug": "openfold3",
     "provider": "AlQuraishi Lab",
     "description": "Open reproduction of AlphaFold 3, accelerated with MLX for Apple Silicon.",
-    "tags": ["protein", "RNA", "DNA", "open weights"],
+    "tags": [
+      "protein",
+      "RNA",
+      "DNA",
+      "open weights",
+      "MLX"
+    ],
     "license": "Apache-2.0"
   },
   {
@@ -36,7 +54,10 @@
     "rodeo_slug": "alphafold-2",
     "provider": "Google DeepMind",
     "description": "The original high-accuracy protein folding model. Catalog entry only: no Dimitri runner yet.",
-    "tags": ["protein", "reference"],
+    "tags": [
+      "protein",
+      "reference"
+    ],
     "license": null
   },
   {
@@ -46,7 +67,11 @@
     "rodeo_slug": "esmfold",
     "provider": "Meta AI",
     "description": "Fast single-sequence protein folding from ESM embeddings. Catalog entry only: no Dimitri runner yet.",
-    "tags": ["protein", "fast", "reference"],
+    "tags": [
+      "protein",
+      "fast",
+      "reference"
+    ],
     "license": null
   },
   {
@@ -56,7 +81,10 @@
     "rodeo_slug": "rosettafold",
     "provider": "Baker Lab",
     "description": "Three-track protein structure prediction network. Catalog entry only: no Dimitri runner yet.",
-    "tags": ["protein", "reference"],
+    "tags": [
+      "protein",
+      "reference"
+    ],
     "license": null
   }
 ]

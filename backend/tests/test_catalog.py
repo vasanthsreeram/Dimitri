@@ -93,6 +93,11 @@ def test_catalog_entries_merge_bio_rodeo_metadata(tmp_path: Path) -> None:
     by_id = {entry.id: entry for entry in entries}
     assert by_id["alphafold3-mac"].source == "bio.rodeo"
     assert by_id["alphafold3-mac"].provider == "Google DeepMind"
+    assert by_id["alphafold3-mac"].device == "mlx"
+    assert by_id["alphafold3-mac"].runtime == "MLX (Metal)"
+    assert by_id["rhofold"].device == "mps"
+    assert by_id["openfold3"].device == "mps"
+    assert by_id["openfold3"].runtime == "OpenFold3-MLX kernels on PyTorch MPS"
     assert by_id["rhofold"].source_url.endswith("/models/rhofold-plus")
     assert sources["bio_rodeo"]["api"] is None
 
@@ -105,3 +110,14 @@ def test_runner_status_points_at_configured_paths(tmp_path: Path, runner_id: str
     assert status.ready is False
     assert status.paths
     assert status.detail
+
+
+def test_stale_cache_falls_back_to_the_shipped_snapshot(tmp_path: Path) -> None:
+    settings = Settings(home=str(tmp_path / "home"))
+    settings.ensure_dirs()
+    adapter = BioRodeoAdapter(settings, client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200))))
+    adapter.save_cache({"entries": [{"slug": "stale-only", "name": "Stale"}], "fetched_at": 0})
+    service = CatalogService(settings, RunnerRegistry(settings), adapter)
+    payload, records = service.rodeo_records()
+    assert "stale-only" not in records
+    assert payload.get("verified_at") == "2026-10-17"

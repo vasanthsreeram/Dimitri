@@ -5,6 +5,16 @@
 # uv environment, and downloads the public checkpoint from Hugging Face.
 set -euo pipefail
 
+if [ "$(uname -s)" != "Darwin" ] || [ "$(uname -m)" != "arm64" ]; then
+  echo "Dimitri Studio is MacBook-only (Apple Silicon). Linux/CUDA installs are not supported." >&2
+  exit 1
+fi
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "uv is required: https://docs.astral.sh/uv/getting-started/installation/" >&2
+  exit 1
+fi
+
 REPO="${1:?repo dir required}"
 PATCH="${2:?patch file required}"
 

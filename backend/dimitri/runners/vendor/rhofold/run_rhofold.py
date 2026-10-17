@@ -29,7 +29,6 @@ def main() -> int:
     parser.add_argument("--weights", required=True)
     parser.add_argument("--fasta", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--device", default="mps")
     args = parser.parse_args()
 
     repo = Path(args.repo).resolve()
@@ -44,8 +43,10 @@ def main() -> int:
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    device = args.device
-    if device == "mps" and not torch.backends.mps.is_available():
+    # Mac-native order: MPS only; CPU is a last resort and is reported.
+    device = "mps"
+    if not torch.backends.mps.is_available():
+        print("MPS is unavailable; falling back to CPU (last resort).")
         device = "cpu"
 
     started = time.time()

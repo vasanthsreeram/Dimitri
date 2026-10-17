@@ -244,7 +244,12 @@ class CatalogService:
     def rodeo_records(self) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
         cached = self.adapter.load_cache()
         snapshot = self._snapshot()
-        chosen = cached if cached.get("entries") else snapshot
+        if cached.get("entries") and (
+            self.adapter.cache_fresh(cached) or not snapshot.get("entries")
+        ):
+            chosen = cached
+        else:
+            chosen = snapshot
         return chosen, {entry["slug"]: entry for entry in chosen.get("entries", [])}
 
     def _entry_size(self, entry: dict[str, Any]) -> int:
@@ -293,11 +298,14 @@ class CatalogService:
                     provider=record.get("provider") or raw.get("provider"),
                     description=record.get("description") or raw.get("description", ""),
                     tags=raw.get("tags", []),
-                    license=record.get("license") or raw.get("license"),
+                    license=raw.get("license") or record.get("license"),
                     openness=record.get("openness"),
                     source="bio.rodeo" if record else "local",
                     source_url=record.get("url") or raw.get("source_url"),
                     entity_types=manifest.entity_types if manifest else raw.get("entity_types", []),
+                    runtime=manifest.runtime if manifest else None,
+                    device=manifest.device if manifest else None,
+                    fallback=manifest.fallback if manifest else None,
                     installed=bool(status and status.installed),
                     ready=bool(status and status.ready),
                     installable=bool(runner_id),

@@ -6,6 +6,7 @@ import asyncio
 import platform
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -55,9 +56,12 @@ def lm_studio_status(base_url: str, timeout: float = 0.8) -> LmStudioStatus:
         response = httpx.get(url, timeout=timeout)
         response.raise_for_status()
         payload = response.json()
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, list):
+            raise ValueError("unexpected /models payload")
         models = [
             item.get("id", "")
-            for item in payload.get("data", [])
+            for item in data
             if isinstance(item, dict) and item.get("id")
         ]
         return LmStudioStatus(
@@ -66,7 +70,7 @@ def lm_studio_status(base_url: str, timeout: float = 0.8) -> LmStudioStatus:
             models=models[:20],
             detail=f"LM Studio server reachable ({len(models)} model(s)).",
         )
-    except (httpx.HTTPError, ValueError) as exc:
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
         return LmStudioStatus(
             reachable=False,
             base_url=base_url,
@@ -78,24 +82,41 @@ class AppState:
     def __init__(self, home: Path | None = None) -> None:
         self.settings = Settings.load(home)
         self.settings.ensure_dirs()
-        self.rebuild()
+        self._storage_cache: tuple[float, list[DiskUsage]] | None = None
+        self.rebuild(full=True)
 
-    def rebuild(self) -> None:
+    def rebuild(self, full: bool = True) -> None:
+        """Rebuild runtime objects.
+
+        A full rebuild recreates the store and worker and is only safe when no
+        job is active. Settings changes during a running job use a partial
+        rebuild so the worker and its job records stay intact.
+        """
         self.registry = RunnerRegistry(self.settings)
-        self.store = JobStore(self.settings)
         self.catalog = CatalogService(self.settings, self.registry)
-        self.manager = JobManager(self.settings, self.store, self.registry)
+        if full:
+            self.store = JobStore(self.settings)
+            self.manager = JobManager(self.settings, self.store, self.registry)
+        else:
+            self.store.settings = self.settings
+            self.manager.settings = self.settings
+            self.manager.registry = self.registry
 
     def storage(self) -> list[DiskUsage]:
+        now = time.time()
+        if self._storage_cache and now - self._storage_cache[0] < 30:
+            return self._storage_cache[1]
         paths = {
             "models": self.settings.models_path,
             "results": self.settings.results_path,
             "cache": self.settings.cache_path,
         }
-        return [
+        usage = [
             DiskUsage(path=str(path), bytes=_dir_size(path), exists=path.exists())
             for path in paths.values()
         ]
+        self._storage_cache = (now, usage)
+        return usage
 
 
 def create_app(home: Path | None = None) -> FastAPI:
@@ -113,18 +134,18 @@ def create_app(home: Path | None = None) -> FastAPI:
         }
 
     @app.get("/api/status", response_model=StatusResponse)
-    def status() -> StatusResponse:
+    def status(request: Request) -> StatusResponse:
         sources = state.catalog.sources()
         return StatusResponse(
             status="ok",
             version=APP_VERSION,
             python=sys.version.split()[0],
             platform=platform.platform(),
-            backend_url=f"http://127.0.0.1:{DEFAULT_PORT}",
+            backend_url=str(request.base_url).rstrip("/"),
             storage=state.storage(),
             lm_studio=lm_studio_status(state.settings.lms_base_url),
             runners=state.registry.statuses(),
-            active_jobs=len([j for j in state.store.list() if j.status in ("queued", "running")]),
+            active_jobs=state.store.count_active(),
             bio_rodeo=sources.get("bio_rodeo", {}),
         )
 
@@ -134,8 +155,8 @@ def create_app(home: Path | None = None) -> FastAPI:
 
     @app.put("/api/settings")
     def put_settings(patch: dict[str, Any]) -> dict[str, Any]:
-        if "lms_base_url" in patch and not str(patch["lms_base_url"]).startswith("http"):
-            raise HTTPException(400, "lms_base_url must start with http:// or https://")
+        allowed = set(state.settings.to_dict())
+        patch = {key: value for key, value in patch.items() if key in allowed}
         path_keys = (
             "home",
             "models_dir",
@@ -153,9 +174,54 @@ def create_app(home: Path | None = None) -> FastAPI:
                 continue
             if not isinstance(value, str) or not value.startswith(("/", "~")):
                 raise HTTPException(400, f"{key} must be an absolute path")
-        state.settings.update(patch)
-        state.settings.ensure_dirs()
-        state.rebuild()
+
+        if "lms_base_url" in patch:
+            value = patch["lms_base_url"]
+            try:
+                parsed = httpx.URL(str(value))
+            except Exception as exc:
+                raise HTTPException(400, "lms_base_url is not a valid URL") from exc
+            if parsed.scheme not in ("http", "https") or not parsed.host:
+                raise HTTPException(400, "lms_base_url must be an http(s) URL")
+
+        if "bio_rodeo_cache_hours" in patch:
+            value = patch["bio_rodeo_cache_hours"]
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 8760:
+                raise HTTPException(400, "bio_rodeo_cache_hours must be an integer from 1 to 8760")
+
+        current = state.settings.to_dict()
+        if "home" in patch and patch["home"] != current["home"]:
+            old_home = Path(current["home"]).expanduser()
+            new_home = Path(patch["home"]).expanduser()
+            for key in path_keys:
+                if key == "home" or key in patch:
+                    continue
+                old_path = Path(current[key]).expanduser()
+                try:
+                    relative = old_path.relative_to(old_home)
+                except ValueError:
+                    continue
+                patch[key] = str(new_home / relative)
+
+        storage_keys = {"home", "models_dir", "results_dir", "cache_dir"}
+        active = state.store.count_active()
+        if active and any(
+            key in patch and patch[key] != current[key] for key in storage_keys
+        ):
+            raise HTTPException(
+                409, "Stop running jobs before changing storage paths"
+            )
+
+        try:
+            candidate = Settings(**{**current, **patch})
+            candidate.ensure_dirs()
+        except OSError as exc:
+            raise HTTPException(400, f"Could not create the storage paths: {exc}") from exc
+
+        candidate.save()
+        state.settings = candidate
+        state._storage_cache = None
+        state.rebuild(full=active == 0)
         return state.settings.to_dict()
 
     @app.get("/api/runners", response_model=list[RunnerManifestModel])
@@ -232,6 +298,11 @@ def create_app(home: Path | None = None) -> FastAPI:
 
     @app.delete("/api/jobs/{job_id}")
     def delete_job(job_id: str) -> dict[str, bool]:
+        job = state.store.get(job_id)
+        if job is None:
+            raise HTTPException(404, "Job not found")
+        if job.status in ("queued", "running"):
+            raise HTTPException(409, "Cancel the job before deleting it")
         if not state.store.delete(job_id):
             raise HTTPException(404, "Job not found")
         return {"deleted": True}

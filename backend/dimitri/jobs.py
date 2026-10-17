@@ -82,10 +82,17 @@ class JobManager:
             job = self.store.get(job_id)
             if job and job.status in ("queued", "running"):
                 # Queued but not started: a control is created when it starts.
+                stages = job.stages
+                for stage in stages:
+                    if stage.status in ("pending", "running"):
+                        stage.status = "skipped"
+                        stage.progress = 0.0
                 self.store.update(
                     job_id,
                     status="cancelled",
+                    stages=stages,
                     finished_at=time.time(),
+                    current_stage=None,
                     error=None,
                     hint="Cancelled before it started.",
                 )
@@ -240,9 +247,16 @@ class JobManager:
             )
 
     def _cancel(self, job_id: str) -> None:
+        current = self.store.get(job_id)
+        stages = current.stages if current else []
+        for stage in stages:
+            if stage.status in ("running", "pending"):
+                stage.status = "skipped"
+                stage.progress = 0.0
         self.store.update(
             job_id,
             status="cancelled",
+            stages=stages,
             finished_at=time.time(),
             current_stage=None,
             error=None,

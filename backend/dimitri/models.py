@@ -22,11 +22,14 @@ class PredictionRequest(BaseModel):
 
     @field_validator("sequence")
     @classmethod
-    def normalize_sequence(cls, value: str) -> str:
-        cleaned = "".join(value.split()).upper()
+    def normalize_sequence(cls, value: str, info) -> str:
+        cleaned = "".join(value.split())
         if not cleaned:
             raise ValueError("sequence must not be empty")
-        return cleaned
+        # SMILES is case-sensitive; only sequence entities are uppercased.
+        if info.data.get("entity_type") == "ligand":
+            return cleaned
+        return cleaned.upper()
 
     @field_validator("name")
     @classmethod
@@ -59,6 +62,7 @@ class JobResult(BaseModel):
     atoms: int = 0
     chains: int = 1
     format: Literal["cif", "pdb"] = "cif"
+    device: str | None = None
     duration_s: float | None = None
     version: str = "0.1.0"
     note: str | None = None
@@ -99,6 +103,9 @@ class RunnerManifestModel(BaseModel):
     description: str
     entity_types: list[str]
     source_url: str
+    runtime: str
+    device: str
+    fallback: str | None = None
     citation: str | None = None
     license: str | None = None
     weight_note: str | None = None
@@ -131,6 +138,9 @@ class CatalogEntry(BaseModel):
     source: str = "local"
     source_url: str | None = None
     entity_types: list[str] = Field(default_factory=list)
+    runtime: str | None = None
+    device: str | None = None
+    fallback: str | None = None
     installed: bool = False
     ready: bool = False
     installable: bool = True
@@ -190,4 +200,5 @@ class RunResult:
     pae: list[list[float]] | None = None
     pae_note: str | None = None
     note: str | None = None
+    device: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)

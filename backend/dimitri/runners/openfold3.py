@@ -10,6 +10,7 @@ The runner uses the documented predict entry point:
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 from ..config import Settings
@@ -46,6 +47,9 @@ class OpenFold3Runner(Runner):
         ),
         entity_types=("protein", "rna", "dna"),
         source_url="https://github.com/latent-spacecraft/openfold-3-mlx",
+        runtime="OpenFold3-MLX kernels on PyTorch MPS",
+        device="mps",
+        fallback=None,
         citation="OpenFold3-preview, AlQuraishi Lab (2025)",
         license="Apache-2.0",
         weight_note=(
@@ -91,10 +95,14 @@ class OpenFold3Runner(Runner):
         return (root / "ckpt_root").exists() and any(root.glob("*/*.pt"))
 
     def status(self, settings: Settings) -> RunnerStatusModel:
-        installed = (self.repo / "openfold3" / "run_openfold.py").exists() and self.python.exists()
+        checkout = (self.repo / "openfold3" / "run_openfold.py").exists()
+        env_ready = self.python.exists()
+        installed = checkout and env_ready
         weights = self.parameters_present()
-        if not installed:
+        if not checkout:
             detail = f"Not installed. Expected checkout at {self.repo}."
+        elif not env_ready:
+            detail = "Checkout found, but the Python environment is missing."
         elif not weights:
             detail = "Installed. Parameters missing; run setup to download them."
         else:
@@ -105,13 +113,17 @@ class OpenFold3Runner(Runner):
             ready=installed and weights,
             weights_present=weights,
             detail=detail,
-            paths={"repo": str(self.repo), "weights": str(self.cache)},
+            paths={
+                "repo": str(self.repo),
+                "weights": str(self.parameter_root() or self.cache),
+            },
         )
 
     def install(
         self, settings: Settings, progress: ProgressFn, control: JobControl
     ) -> InstallResult:
         progress("setup", 0.05, "Installing OpenFold3-MLX")
+        self.repo.parent.mkdir(parents=True, exist_ok=True)
         log = LogBuffer()
         run_command(
             ["bash", str(SETUP_DIR / "openfold3.sh"), str(self.repo), str(self.cache)],
@@ -246,31 +258,52 @@ class OpenFold3Runner(Runner):
                     chosen = path
                     break
 
-        plddt_values = self._plddt_list(best_conf)
+        cif_text = chosen.read_text(encoding="utf-8", errors="replace")
+        full_conf: dict = {}
+        if best_conf_path is not None:
+            full_path = best_conf_path.with_name(
+                best_conf_path.name.replace(
+                    "_confidences_aggregated.json", "_confidences.json"
+                )
+            )
+            if full_path.exists() and full_path != best_conf_path:
+                full_conf = self._read_json(full_path)
+        # The CIF B-factors are per atom; averaging them per residue gives the
+        # chart its residue series. The full confidence file is per atom too.
+        plddt_values = self._residue_plddt_from_cif(cif_text)
+        if not plddt_values:
+            plddt_values = [
+                float(v)
+                for v in full_conf.get("plddt", [])
+                if isinstance(v, (int, float))
+            ]
+        if not plddt_values:
+            plddt_values = self._plddt_list(best_conf)
+
         mean_plddt = self._mean(best_conf.get("avg_plddt"), best_conf.get("mean_plddt"))
         if mean_plddt is None and plddt_values:
             mean_plddt = sum(plddt_values) / len(plddt_values)
-        pae = best_conf.get("pae") or best_conf.get("predicted_aligned_error")
-        if not isinstance(pae, list):
-            pae = None
         return RunResult(
-            cif_text=chosen.read_text(encoding="utf-8", errors="replace"),
+            cif_text=cif_text,
             metrics={
                 "plddt": round(mean_plddt, 2) if mean_plddt is not None else None,
                 "ptm": self._metric(best_conf, "ptm"),
                 "iptm": self._metric(best_conf, "iptm"),
             },
             per_residue_plddt=[round(v, 2) for v in plddt_values],
-            pae=pae,
-            pae_note="Predicted aligned error (token grid)." if pae else None,
+            pae=None,
+            pae_note=None,
             note=(
                 "OpenFold3 metrics are read from its aggregated confidence JSON. "
-                "MSA and template search run as configured by the upstream MLX runner."
+                "The MLX kernel set runs on PyTorch's MPS device. OpenFold3 does "
+                "not write a token-level PAE matrix, so the PAE panel is empty."
             ),
+            device="mps",
             extra={
                 "seed": request.seed,
                 "samples": request.samples,
                 "source_file": chosen.name,
+                "has_pde": bool(full_conf.get("pde")),
             },
         )
 
@@ -313,3 +346,62 @@ class OpenFold3Runner(Runner):
             if isinstance(value, list) and value and isinstance(value[0], (int, float)):
                 return [float(v) for v in value]
         return []
+
+    @staticmethod
+    def _residue_plddt_from_cif(cif_text: str) -> list[float]:
+        """Average the CIF B-factors (pLDDT) per residue, in file order."""
+        lines = cif_text.splitlines()
+        headers: list[str] = []
+        data_start = -1
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("_atom_site."):
+                headers.append(stripped.split(".", 1)[1].strip())
+            elif headers:
+                if not stripped or stripped.startswith("#"):
+                    continue
+                if stripped.startswith("_"):
+                    break
+                data_start = index
+                break
+        if not headers or data_start < 0:
+            return []
+
+        def column(*names: str) -> int | None:
+            for name in names:
+                if name in headers:
+                    return headers.index(name)
+            return None
+
+        res_col = column("auth_seq_id", "label_seq_id")
+        b_col = column("B_iso_or_equiv")
+        chain_col = column("auth_asym_id", "label_asym_id")
+        if res_col is None or b_col is None:
+            return []
+        ordered: list[str] = []
+        sums: dict[str, float] = {}
+        counts: dict[str, int] = {}
+        tokens: list[str] = []
+        for line in lines[data_start:]:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith(("#", "_", "data_")):
+                break
+            tokens.extend(shlex.split(line, posix=True))
+            while len(tokens) >= len(headers):
+                row = tokens[: len(headers)]
+                del tokens[: len(headers)]
+                try:
+                    chain = row[chain_col] if chain_col is not None else ""
+                    key = f"{chain}:{row[res_col]}"
+                    value = float(row[b_col])
+                except (IndexError, ValueError):
+                    continue
+                if key not in sums:
+                    ordered.append(key)
+                    sums[key] = 0.0
+                    counts[key] = 0
+                sums[key] += value
+                counts[key] += 1
+        return [round(sums[key] / counts[key], 2) for key in ordered if counts[key]]

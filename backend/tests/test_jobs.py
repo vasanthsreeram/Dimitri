@@ -45,6 +45,7 @@ def test_demo_job_completes_with_metrics_and_stages(client: TestClient) -> None:
     assert result["residues"] == 29
     assert result["atoms"] == 29
     assert result["format"] == "cif"
+    assert result["device"] == "cpu"  # synthetic test runner
     assert done["log_tail"]
 
 

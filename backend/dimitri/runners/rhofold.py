@@ -41,6 +41,9 @@ class RhoFoldRunner(Runner):
         ),
         entity_types=("rna",),
         source_url="https://github.com/ml4bio/RhoFold",
+        runtime="PyTorch MPS",
+        device="mps",
+        fallback="CPU (last resort)",
         citation="Shen et al., Nature Methods 21, 2287-2299 (2024)",
         license="Apache-2.0",
         weight_note=(
@@ -97,11 +100,12 @@ class RhoFoldRunner(Runner):
         self, settings: Settings, progress: ProgressFn, control: JobControl
     ) -> InstallResult:
         progress("setup", 0.05, "Cloning RhoFold and installing dependencies")
+        self.repo.parent.mkdir(parents=True, exist_ok=True)
         log = LogBuffer()
         script = SETUP_DIR / "rhofold.sh"
         run_command(
             ["bash", str(script), str(self.repo), str(VENDOR_DIR / "rhofold-mac-fast.patch")],
-            cwd=self.repo.parent if self.repo.parent.exists() else None,
+            cwd=self.repo.parent,
             env=None,
             control=control,
             on_line=log.add,
@@ -180,8 +184,6 @@ class RhoFoldRunner(Runner):
                 str(fasta),
                 "--output-dir",
                 str(out_dir),
-                "--device",
-                "mps",
             ],
             cwd=self.repo,
             env=env,
@@ -197,6 +199,13 @@ class RhoFoldRunner(Runner):
         if not pdb_path.exists():
             raise RunnerError("RhoFold finished without writing a PDB.")
         progress("write", 1.0, "Exports ready")
+        device = str(payload.get("device") or "mps")
+        note = (
+            "RhoFold+ reports pLDDT only; pTM and ipTM are not defined for this "
+            "model. Single-sequence mode, no MSA database search."
+        )
+        if device != "mps":
+            note += " Ran on CPU because MPS was unavailable."
         return RunResult(
             pdb_text=pdb_path.read_text(encoding="utf-8", errors="replace"),
             metrics={
@@ -207,12 +216,10 @@ class RhoFoldRunner(Runner):
             per_residue_plddt=[float(v) for v in payload.get("per_residue_plddt", [])],
             pae=None,
             pae_note="RhoFold+ does not produce a PAE matrix.",
-            note=(
-                "RhoFold+ reports pLDDT only; pTM and ipTM are not defined for this "
-                "model. Single-sequence mode, no MSA database search."
-            ),
+            note=note,
+            device=device,
             extra={
-                "device": payload.get("device"),
+                "device": device,
                 "seconds": payload.get("seconds"),
                 "seed": request.seed,
             },

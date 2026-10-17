@@ -16,6 +16,9 @@ def test_runners_are_registered_and_demo_is_hidden(client: TestClient) -> None:
     for runner in runners:
         assert runner["stages"], "every runner must declare its stages"
         assert runner["source_url"].startswith("https://github.com/")
+        assert runner["device"] in ("mlx", "mps")
+        assert runner["runtime"]
+        assert "cuda" not in runner["runtime"].lower()
 
 
 def test_status_reports_storage_and_lm_studio(client: TestClient) -> None:
@@ -122,3 +125,30 @@ def test_sequence_is_normalized(client: TestClient) -> None:
     )
     assert response.status_code == 200
     assert response.json()["job"]["sequence"] == "MKTAYIAK"
+
+
+def test_ligand_smiles_case_is_preserved(client: TestClient) -> None:
+    response = client.post(
+        "/api/jobs",
+        json={
+            "model_id": "demo",
+            "entity_type": "ligand",
+            "sequence": "c1ccccc1O",
+            "name": "phenol",
+            "samples": 1,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["job"]["sequence"] == "c1ccccc1O"
+
+
+def test_changing_home_rebases_managed_paths(client: TestClient, tmp_path) -> None:
+    new_home = tmp_path / "new-home"
+    response = client.put("/api/settings", json={"home": str(new_home)})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["home"] == str(new_home)
+    assert body["models_dir"] == str(new_home / "models")
+    assert body["results_dir"] == str(new_home / "results")
+    assert body["cache_dir"] == str(new_home / "cache")
+    assert new_home.exists()

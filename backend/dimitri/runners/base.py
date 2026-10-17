@@ -11,6 +11,7 @@ confidence data through :class:`RunResult`.
 
 from __future__ import annotations
 
+import os
 import shutil
 import signal
 import subprocess
@@ -52,6 +53,9 @@ class RunnerManifest:
     entity_types: tuple[str, ...]
     source_url: str
     stages: tuple[StageSpec, ...]
+    runtime: str = "MLX (Metal)"
+    device: str = "mlx"
+    fallback: str | None = None
     citation: str | None = None
     license: str | None = None
     weight_note: str | None = None
@@ -73,6 +77,9 @@ class RunnerManifest:
             description=self.description,
             entity_types=list(self.entity_types),
             source_url=self.source_url,
+            runtime=self.runtime,
+            device=self.device,
+            fallback=self.fallback,
             citation=self.citation,
             license=self.license,
             weight_note=self.weight_note,
@@ -86,6 +93,17 @@ class RunnerManifest:
 
 
 ProgressFn = Callable[[str, float, str | None], None]
+
+
+def _signal_group(proc: subprocess.Popen[str], sig: int) -> None:
+    """Signal the whole process group so grandchildren die too."""
+    try:
+        os.killpg(os.getpgid(proc.pid), sig)
+    except (ProcessLookupError, PermissionError):
+        try:
+            proc.send_signal(sig)
+        except ProcessLookupError:
+            pass
 
 
 class JobControl:
@@ -105,16 +123,13 @@ class JobControl:
         with self._lock:
             proc = self._proc
         if proc and proc.poll() is None:
-            try:
-                proc.send_signal(signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+            _signal_group(proc, signal.SIGTERM)
 
     def attach(self, proc: subprocess.Popen[str]) -> None:
         with self._lock:
             self._proc = proc
         if self.cancelled and proc.poll() is None:
-            proc.send_signal(signal.SIGTERM)
+            _signal_group(proc, signal.SIGTERM)
 
     def detach(self) -> None:
         with self._lock:
@@ -173,19 +188,42 @@ def run_command(
     except FileNotFoundError as exc:
         raise RunnerError(f"{label} could not start: {exc}") from exc
     control.attach(proc)
+    tail: list[str] = []
     try:
         assert proc.stdout is not None
-        for line in proc.stdout:
-            on_line(line.rstrip())
-            if control.cancelled:
-                break
-        code = proc.wait()
+        try:
+            for line in proc.stdout:
+                tail.append(line.rstrip())
+                if len(tail) > 20:
+                    del tail[0]
+                on_line(line.rstrip())
+                if control.cancelled:
+                    break
+        except BaseException:
+            _signal_group(proc, signal.SIGKILL)
+            raise
+        finally:
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
+        if control.cancelled:
+            _signal_group(proc, signal.SIGTERM)
+        try:
+            code = proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            _signal_group(proc, signal.SIGKILL)
+            code = proc.wait()
     finally:
         control.detach()
     if control.cancelled:
         raise RunnerError("cancelled")
     if code != 0:
-        raise RunnerError(f"{label} exited with code {code}")
+        detail = "\n".join(tail[-10:]).strip()
+        message = f"{label} exited with code {code}"
+        if detail:
+            message += f":\n{detail}"
+        raise RunnerError(message)
 
 
 def tail_lines(lines: list[str], limit: int = 60) -> list[str]:

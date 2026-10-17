@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tempfile
 import threading
 import time
 import uuid
@@ -65,13 +66,26 @@ class JobStore:
     def save(self, job: Job) -> None:
         with self._lock:
             self._jobs[job.id] = job
-            snapshot = job.model_copy(deep=True)
-        directory = self.job_dir(job.id)
+            self._persist(job.model_copy(deep=True))
+
+    def _persist(self, snapshot: Job) -> None:
+        directory = self.job_dir(snapshot.id)
         directory.mkdir(parents=True, exist_ok=True)
-        target = directory / "job.json"
-        tmp = target.with_suffix(".json.tmp")
-        tmp.write_text(snapshot.model_dump_json(indent=2), encoding="utf-8")
-        os.replace(tmp, target)
+        handle = tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=directory,
+            prefix=".job-",
+            suffix=".json.tmp",
+            delete=False,
+        )
+        try:
+            with handle:
+                handle.write(snapshot.model_dump_json(indent=2))
+            os.replace(handle.name, directory / "job.json")
+        finally:
+            if os.path.exists(handle.name):
+                os.unlink(handle.name)
 
     def update(self, job_id: str, **fields) -> Job | None:
         with self._lock:
@@ -81,13 +95,19 @@ class JobStore:
             for key, value in fields.items():
                 setattr(job, key, value)
             snapshot = job.model_copy(deep=True)
-        self.save(snapshot)
-        return snapshot
+            self._persist(snapshot)
+            return snapshot
 
     def get(self, job_id: str) -> Job | None:
         with self._lock:
             job = self._jobs.get(job_id)
             return job.model_copy(deep=True) if job else None
+
+    def count_active(self) -> int:
+        with self._lock:
+            return len(
+                [job for job in self._jobs.values() if job.status in ("queued", "running")]
+            )
 
     def list(self, limit: int = 100) -> list[Job]:
         with self._lock:
@@ -142,6 +162,7 @@ class JobStore:
             atoms=stats.atoms,
             chains=stats.chains,
             format="cif",
+            device=run_result.device,
             duration_s=round(duration_s, 1),
             note=run_result.note,
             extra=run_result.extra,
@@ -178,6 +199,12 @@ class JobStore:
                 continue
             if job.status in ("running", "queued"):
                 job.status = "failed"
+                job.finished_at = time.time()
                 job.error = "Backend restarted before this job finished."
+                for stage in job.stages:
+                    if stage.status == "running":
+                        stage.status = "failed"
+                        stage.progress = 0.0
             with self._lock:
                 self._jobs[job.id] = job
+                self._persist(job)

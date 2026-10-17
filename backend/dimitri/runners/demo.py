@@ -41,6 +41,10 @@ class DemoRunner(Runner):
         ),
         entity_types=("protein", "rna", "dna", "ligand"),
         source_url="https://github.com/vasanthsreeram/Dimitri",
+        # Synthetic tests only. It never touches a model runtime or a GPU.
+        runtime="Synthetic (tests only)",
+        device="cpu",
+        fallback=None,
         stages=(
             StageSpec("validate", "Validating input"),
             StageSpec("fold", "Folding"),
@@ -98,6 +102,7 @@ class DemoRunner(Runner):
             pae=pae,
             pae_note="Synthetic PAE from the demo runner.",
             note="Synthetic structure from the Dimitri demo runner. Not a prediction.",
+            device="cpu",
             extra={"seed": request.seed, "samples": request.samples},
         )
 
@@ -148,6 +153,7 @@ class DemoRunner(Runner):
             "P" if entity_type in ("rna", "dna") else "C1"
         )
         element = "C" if atom_name.startswith("C") else "P"
+        name_field = f" {atom_name:<3}"
         resname = _RESIDUES.get(entity_type, "UNK")
         lines: list[str] = []
         serial = 1
@@ -157,8 +163,10 @@ class DemoRunner(Runner):
                 resname_i = "AUCG"[(i - 1) % 4]
             elif entity_type == "dna":
                 resname_i = "DA" if i % 2 else "DT"
+            # Standard PDB columns: name 13-16, altLoc 17, resName 18-20,
+            # chain 22, resSeq 23-26, iCode 27, x/y/z 31-54.
             lines.append(
-                f"ATOM  {serial:5d}  {atom_name:<3}{resname_i:>3} A{i:4d}    "
+                f"ATOM  {serial:5d} {name_field} {resname_i:>3} A{i:4d}    "
                 f"{x:8.3f}{y:8.3f}{z:8.3f}{1.00:6.2f}{b:6.2f}"
                 f"          {element:>2}"
             )

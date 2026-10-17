@@ -29,11 +29,14 @@ from .base import (
     run_command,
 )
 
-WEIGHT_FORM_URL = "https://forms.gle/svvpY4u2jsHEwWYS6"
+WEIGHT_URL = "https://storage.googleapis.com/alphafold3/af3.bin.zst"
+WEIGHTS_TERMS_URL = (
+    "https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md"
+)
 PROTEIN_ALPHABET = set("ACDEFGHIKLMNPQRSTVWYXBZUO")
 RNA_ALPHABET = set("ACGU")
 DNA_ALPHABET = set("ACGT")
-SMILES_MARKERS = set("()[]=#@+-/\\%.0123456789")
+SMILES_MARKERS = set("()[]=#@+-/\\%.")
 SETUP_DIR = Path(__file__).resolve().parent / "setup"
 
 
@@ -50,18 +53,22 @@ class AlphaFold3MacRunner(Runner):
         ),
         entity_types=("protein", "rna", "dna", "ligand"),
         source_url="https://github.com/omrikais/alphafold3-mac",
+        runtime="MLX (Metal)",
+        device="mlx",
+        fallback=None,
         citation="Abramson et al., Nature 630, 493-500 (2024)",
-        license="Apache-2.0 (code); model parameters under DeepMind's terms",
+        license="CC-BY-NC-SA 4.0 (code); model parameters under DeepMind's terms",
         weight_note=(
-            "AlphaFold 3 weights are not redistributable. Request them with "
-            "DeepMind's form, then place af3.bin.zst in the weights directory. "
-            "Request decisions normally take a few business days."
+            "DeepMind's old request form is closed. The weights are published at "
+            "storage.googleapis.com/alphafold3/af3.bin.zst under the AlphaFold 3 "
+            "Model Parameters Terms of Use. Dimitri never downloads them; place "
+            "af3.bin.zst in the weights directory yourself."
         ),
-        weight_request_url=WEIGHT_FORM_URL,
+        weight_request_url=WEIGHT_URL,
         weight_dir_key="af3_weights_dir",
         setup_hint=(
-            "Clone alphafold3-mac, then run its scripts/install.sh in Terminal. "
-            "The installer is interactive and builds native extensions."
+            "Clones alphafold3-mac and syncs its uv environment. If the CLI reports "
+            "missing native tooling or databases, run its scripts/install.sh."
         ),
         stages=(
             StageSpec("load", "Loading model"),
@@ -117,7 +124,7 @@ class AlphaFold3MacRunner(Runner):
     def install(
         self, settings: Settings, progress: ProgressFn, control: JobControl
     ) -> InstallResult:
-        progress("clone", 0.05, f"Preparing {self.repo}")
+        progress("setup", 0.05, f"Preparing {self.repo}")
         self.repo.parent.mkdir(parents=True, exist_ok=True)
         log = LogBuffer()
         run_command(
@@ -130,13 +137,14 @@ class AlphaFold3MacRunner(Runner):
         )
         self.weights_dir.mkdir(parents=True, exist_ok=True)
         weights = self.weights_file()
-        progress("weights", 1.0, "Checking weights")
+        progress("setup", 1.0, "Checking weights")
         if weights is None:
             return InstallResult(
                 message="alphafold3-mac is installed. Weights still need a request.",
                 hint=(
-                    f"Request af3.bin.zst at {WEIGHT_FORM_URL}, then place it in "
-                    f"{self.weights_dir}. Dimitri never downloads these weights."
+                    f"Download af3.bin.zst from {WEIGHT_URL} (terms: "
+                    f"{WEIGHTS_TERMS_URL}), then place it in {self.weights_dir}. "
+                    "Dimitri never downloads these weights."
                 ),
             )
         return InstallResult(message="alphafold3-mac is installed and ready.")
@@ -159,8 +167,8 @@ class AlphaFold3MacRunner(Runner):
             raise RunnerNotReady(
                 f"AlphaFold 3 weights not found in {self.weights_dir}.",
                 hint=(
-                    f"Request af3.bin.zst at {WEIGHT_FORM_URL} and place it in "
-                    f"{self.weights_dir}."
+                    f"Download af3.bin.zst from {WEIGHT_URL} (terms: "
+                    f"{WEIGHTS_TERMS_URL}) and place it in {self.weights_dir}."
                 ),
             )
         sequence = request.sequence
@@ -173,8 +181,9 @@ class AlphaFold3MacRunner(Runner):
         out_dir.mkdir(parents=True, exist_ok=True)
 
         env = {
-            "PATH": f"{self.repo / '.venv' / 'bin'}:/opt/homebrew/bin:/usr/bin:/bin",
+            "PATH": f"{self.repo / '.venv' / 'bin'}:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
             "PYTHONPATH": "src",
+            "PYTHONUNBUFFERED": "1",
             "HOME": str(Path.home()),
             "TMPDIR": str(workdir / "tmp"),
         }
@@ -244,8 +253,9 @@ class AlphaFold3MacRunner(Runner):
         elif request.entity_type == "rna":
             entity = {"rna": {"id": "A", "sequence": sequence, "unpairedMsa": ""}}
         elif request.entity_type == "dna":
-            entity = {"dna": {"id": "A", "sequence": sequence, "unpairedMsa": ""}}
+            entity = {"dna": {"id": "A", "sequence": sequence}}
         else:
+            # Lowercase or SMILES punctuation means SMILES; otherwise a CCD code.
             if set(sequence) & SMILES_MARKERS or any(c.islower() for c in sequence):
                 entity = {"ligand": {"id": "L", "smiles": sequence}}
             else:
@@ -278,6 +288,77 @@ class AlphaFold3MacRunner(Runner):
         return None
 
     def _collect_outputs(self, out_dir: Path, request) -> RunResult:
+        # Current alphafold3-mac writes: confidence_scores.json plus
+        # structure_rank_<n>.cif. Keep the DeepMind-style fallback for older
+        # checkouts.
+        mlx_files = sorted(out_dir.rglob("confidence_scores.json"))
+        if mlx_files:
+            payload = self._read_json(mlx_files[0])
+            samples = payload.get("samples")
+            if isinstance(samples, dict) and samples:
+                best = min(
+                    samples.values(),
+                    key=lambda item: item.get("rank", 999)
+                    if isinstance(item, dict)
+                    else 999,
+                )
+                rank = int(best.get("rank", 1) or 1)
+                candidates = sorted(out_dir.rglob("structure_rank_*.cif"))
+                cif_path = out_dir / f"structure_rank_{rank}.cif"
+                if not cif_path.exists():
+                    cif_path = next(
+                        (
+                            path
+                            for path in candidates
+                            if path.name == f"structure_rank_{rank}.cif"
+                        ),
+                        candidates[0] if candidates else None,
+                    )
+                if cif_path is None or not cif_path.exists():
+                    raise RunnerError(
+                        "AlphaFold 3 finished but wrote no CIF structure."
+                    )
+                plddt_values = [
+                    float(value)
+                    for value in best.get("plddt", [])
+                    if isinstance(value, (int, float))
+                ]
+                pae = best.get("pae")
+                if not isinstance(pae, list):
+                    pae = None
+                mean_plddt = best.get("mean_plddt")
+                if mean_plddt is None and plddt_values:
+                    mean_plddt = sum(plddt_values) / len(plddt_values)
+                return RunResult(
+                    cif_text=cif_path.read_text(encoding="utf-8", errors="replace"),
+                    metrics={
+                        "plddt": round(float(mean_plddt), 2)
+                        if mean_plddt is not None
+                        else None,
+                        "ptm": self._number(best.get("ptm")),
+                        "iptm": self._number(best.get("iptm")),
+                    },
+                    per_residue_plddt=[round(value, 2) for value in plddt_values],
+                    pae=pae,
+                    pae_note=(
+                        "Predicted aligned error in Ångström (residue grid)."
+                        if pae
+                        else None
+                    ),
+                    note=(
+                        "Confidence values come from AlphaFold 3 (MLX). ipTM is "
+                        "reported for complexes and is null for a single chain."
+                    ),
+                    device="mlx",
+                    extra={
+                        "seed": request.seed,
+                        "samples": request.samples,
+                        "rank": rank,
+                        "ranking_metric": payload.get("ranking_metric"),
+                        "source_file": cif_path.name,
+                    },
+                )
+
         cifs = sorted(out_dir.rglob("*_model.cif"))
         if not cifs:
             cifs = sorted(out_dir.rglob("*.cif"))
@@ -331,8 +412,8 @@ class AlphaFold3MacRunner(Runner):
             cif_text=cif_text,
             metrics={
                 "plddt": round(mean_plddt, 2) if mean_plddt is not None else None,
-                "ptm": float(ptm) if ptm is not None else None,
-                "iptm": float(iptm) if iptm is not None else None,
+                "ptm": self._number(ptm),
+                "iptm": self._number(iptm),
             },
             per_residue_plddt=[round(v, 2) for v in plddt_values],
             pae=pae,
@@ -341,6 +422,7 @@ class AlphaFold3MacRunner(Runner):
                 "Confidence values come from AlphaFold 3. ipTM is reported for "
                 "complexes and is null for a single chain."
             ),
+            device="mlx",
             extra={
                 "seed": request.seed,
                 "samples": request.samples,
@@ -348,6 +430,13 @@ class AlphaFold3MacRunner(Runner):
                 "source_file": root_cif.name,
             },
         )
+
+    @staticmethod
+    def _number(value) -> float | None:
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _read_json(path: Path) -> dict:
