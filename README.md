@@ -15,8 +15,10 @@ Your sequences and results never leave the Mac.</p>
 
 You need a Mac with Apple Silicon (M1 or later) and macOS 14 or later.
 
-1. Download **Dimitri-Studio-0.2.0.dmg**, open it, and drag **Dimitri Studio**
-   to Applications. (To build it yourself, see [Build from source](#build-from-source).)
+1. Open **Dimitri-Studio-0.2.0.dmg** and drag **Dimitri Studio** to
+   Applications. The disk image is built with `scripts/build-app.sh --dmg`
+   ([Build from source](#build-from-source)); it is not published as a
+   GitHub release yet, pending notarization.
 2. Open it. The first launch sets up the app's Python environment by itself
    (about a minute, needs the internet once). No Terminal, Homebrew or Python
    install is needed: the app carries its own copy of [uv](https://docs.astral.sh/uv/).
