@@ -9,6 +9,7 @@ struct APIError: LocalizedError {
 struct BackendClient {
     let baseURL: URL
     private let session: URLSession
+    private let eventsSession: URLSession
     private let decoder: JSONDecoder
     private let encoder: JSONEncoder
 
@@ -19,6 +20,11 @@ struct BackendClient {
         configuration.timeoutIntervalForResource = 600
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         self.session = URLSession(configuration: configuration)
+        let eventConfiguration = URLSessionConfiguration.ephemeral
+        eventConfiguration.timeoutIntervalForRequest = 3600
+        eventConfiguration.timeoutIntervalForResource = 86_400
+        eventConfiguration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        self.eventsSession = URLSession(configuration: eventConfiguration)
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         self.decoder = decoder
@@ -119,7 +125,7 @@ struct BackendClient {
 
     func events(jobID: String) -> AsyncThrowingStream<Job, Error> {
         let url = makeURL("api/jobs/\(jobID)/events")
-        let session = self.session
+        let session = self.eventsSession
         let decoder = self.decoder
         return AsyncThrowingStream { continuation in
             let task = Task {

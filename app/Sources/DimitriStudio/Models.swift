@@ -31,6 +31,7 @@ struct JobResult: Codable {
     let atoms: Int
     let chains: Int
     let format: String
+    let device: String?
     let durationS: Double?
     let version: String
     let note: String?
@@ -74,6 +75,9 @@ struct RunnerManifest: Codable, Identifiable {
     let description: String
     let entityTypes: [String]
     let sourceUrl: String
+    let runtime: String?
+    let device: String?
+    let fallback: String?
     let citation: String?
     let license: String?
     let weightNote: String?
@@ -106,6 +110,9 @@ struct CatalogEntry: Codable, Identifiable {
     let source: String
     let sourceUrl: String?
     let entityTypes: [String]
+    let runtime: String?
+    let device: String?
+    let fallback: String?
     let installed: Bool
     let ready: Bool
     let installable: Bool
@@ -226,7 +233,7 @@ enum EntityKind: String, CaseIterable, Identifiable {
         case .protein: return "MKTAYIAKQRQISFVKSHFSRQDILDLWQ"
         case .rna: return "GGGAAACCCGGGAAACCC"
         case .dna: return "GGGAAACCCGGGAAACCC"
-        case .ligand: return "ATP or CC(=O)O"
+        case .ligand: return "ATP"
         }
     }
     var alphabet: Set<Character>? {

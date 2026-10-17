@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum JobFilter: String, CaseIterable, Identifiable {
     case all, running, done, failed
@@ -24,7 +25,7 @@ struct ResultsView: View {
     @State private var confirmDelete = false
 
     private var filteredJobs: [Job] {
-        app.jobs.filter { job in
+        app.predictions.filter { job in
             let matchesFilter: Bool
             switch filter {
             case .all: matchesFilter = true
@@ -60,7 +61,7 @@ struct ResultsView: View {
                 Text("Jobs")
                     .font(.system(size: 12, weight: .semibold))
                 Spacer()
-                Text("\(app.jobs.count)")
+                Text("\(app.predictions.count)")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.tertiary)
             }
@@ -99,7 +100,7 @@ struct ResultsView: View {
                         VStack(spacing: 7) {
                             Image(systemName: "tray")
                                 .foregroundStyle(.tertiary)
-                            Text(app.jobs.isEmpty ? "No predictions yet" : "No jobs match")
+                            Text(app.predictions.isEmpty ? "No predictions yet" : "No jobs match")
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                         }
@@ -149,15 +150,26 @@ struct ResultsView: View {
                 .frame(maxWidth: 1240, alignment: .leading)
                 .frame(maxWidth: .infinity)
             }
+            .onAppear {
+                if job.isRunning { app.watch(jobID: job.id) }
+            }
+            .onChange(of: app.selectedJobID) { _, newValue in
+                if let id = newValue, let selected = app.job(id: id), selected.isRunning {
+                    app.watch(jobID: id)
+                }
+            }
             .task(id: "\(job.id)-\(job.status)") {
-                if job.status == "completed" {
-                    structureLoading = true
-                    cifText = await app.structureText(jobID: job.id)
-                    structureLoading = false
-                } else {
+                guard job.status == "completed" else {
                     cifText = nil
                     structureLoading = false
+                    return
                 }
+                cifText = nil
+                structureLoading = true
+                let text = await app.structureText(jobID: job.id)
+                guard !Task.isCancelled, app.selectedJobID == job.id else { return }
+                cifText = text
+                structureLoading = false
             }
             .confirmationDialog(
                 "Delete this job and its files?",
@@ -417,6 +429,11 @@ struct ResultsView: View {
                 Card {
                     VStack(alignment: .leading, spacing: 9) {
                         CardTitle(title: "Details", icon: "list.bullet")
+                        if let device = result.device {
+                            KeyValueRow(label: "Device", value: device.uppercased())
+                        } else if let runtime = app.runner(for: job)?.runtime {
+                            KeyValueRow(label: "Target runtime", value: runtime)
+                        }
                         KeyValueRow(label: "Residues", value: "\(result.residues)")
                         KeyValueRow(label: "Atoms", value: "\(result.atoms)")
                         KeyValueRow(label: "Chains", value: "\(result.chains)")
@@ -491,7 +508,13 @@ struct ResultsView: View {
             panel.nameFieldStringValue = payload.filename
             panel.canCreateDirectories = true
             panel.isExtensionHidden = false
-            if panel.runModal() == .OK, let url = panel.url {
+            if let type = UTType(filenameExtension: format) {
+                panel.allowedContentTypes = [type]
+            }
+            if panel.runModal() == .OK, var url = panel.url {
+                if url.pathExtension.isEmpty {
+                    url.appendPathExtension(format)
+                }
                 do {
                     try payload.data.write(to: url)
                     app.present("Saved \(url.lastPathComponent).")

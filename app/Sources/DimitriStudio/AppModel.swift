@@ -15,13 +15,12 @@ final class AppModel: ObservableObject {
     @Published var banner: String?
     @Published private(set) var savingSettings = false
     @Published private(set) var refreshingCatalog = false
-    @Published private(set) var loadingJobIDs: Set<String> = []
 
     private let client = BackendClient()
     private var pollTask: Task<Void, Never>?
     private var watchTask: Task<Void, Never>?
     private var structureCache: [String: String] = [:]
-    private var lastStatusRefresh = Date.distantPast
+    private var refreshGeneration = 0
 
     init() {
         startPolling()
@@ -41,6 +40,8 @@ final class AppModel: ObservableObject {
     }
 
     func refreshAll(quiet: Bool = false) async {
+        refreshGeneration += 1
+        let generation = refreshGeneration
         do {
             async let statusTask: StatusResponse = client.get("api/status")
             async let catalogTask: CatalogResponse = client.get("api/models")
@@ -49,6 +50,7 @@ final class AppModel: ObservableObject {
             let (newStatus, newCatalog, newJobs, newRunners) = try await (
                 statusTask, catalogTask, jobsTask, runnersTask
             )
+            guard generation == refreshGeneration else { return }
             status = newStatus
             catalog = newCatalog.entries
             catalogSources = newCatalog.sources
@@ -70,8 +72,11 @@ final class AppModel: ObservableObject {
     }
 
     func refreshJobs() async {
+        refreshGeneration += 1
+        let generation = refreshGeneration
         do {
             let newJobs: [Job] = try await client.get("api/jobs")
+            guard generation == refreshGeneration else { return }
             jobs = newJobs
             connected = true
             reconcileSelection()
@@ -82,16 +87,21 @@ final class AppModel: ObservableObject {
     }
 
     private func reconcileSelection() {
-        if let id = selectedJobID, !jobs.contains(where: { $0.id == id }) {
-            selectedJobID = jobs.first?.id
+        let available = predictions
+        if let id = selectedJobID, !available.contains(where: { $0.id == id }) {
+            selectedJobID = available.first?.id
         } else if selectedJobID == nil {
-            selectedJobID = jobs.first?.id
+            selectedJobID = available.first?.id
         }
+    }
+
+    var predictions: [Job] {
+        jobs.filter { $0.kind == "predict" }
     }
 
     var selectedJob: Job? {
         guard let id = selectedJobID else { return nil }
-        return jobs.first(where: { $0.id == id })
+        return predictions.first(where: { $0.id == id })
     }
 
     func job(id: String) -> Job? {
@@ -151,18 +161,24 @@ final class AppModel: ObservableObject {
         watchTask?.cancel()
         watchTask = Task { [weak self] in
             guard let self else { return }
-            do {
-                for try await job in self.client.events(jobID: jobID) {
-                    self.merge(job)
-                    if job.isTerminal { break }
+            var failures = 0
+            while !Task.isCancelled {
+                do {
+                    for try await job in self.client.events(jobID: jobID) {
+                        self.merge(job)
+                        if job.isTerminal { break }
+                    }
+                    if self.job(id: jobID)?.isTerminal == true { break }
+                } catch {
+                    if Task.isCancelled { break }
                 }
-            } catch {
-                // Polling in refreshAll is the fallback; surface only once.
+                if self.job(id: jobID) == nil { break }
+                if self.job(id: jobID)?.isTerminal == true { break }
+                failures += 1
+                if failures > 30 { break }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
             await self.refreshJobs()
-            if let job = self.job(id: jobID), job.isTerminal {
-                await self.refreshAll(quiet: true)
-            }
         }
     }
 
@@ -183,7 +199,6 @@ final class AppModel: ObservableObject {
                 "api/models/\(entry.id)/install"
             )
             merge(response.job)
-            selectedJobID = response.job.id
             watch(jobID: response.job.id)
             banner = "Installing \(entry.name). Progress is shown in the Library."
         } catch {
@@ -205,22 +220,23 @@ final class AppModel: ObservableObject {
 
     func installJob(for entry: CatalogEntry) -> Job? {
         guard let runnerID = entry.runnerId else { return nil }
-        return jobs.first { $0.kind == "install" && $0.modelId == runnerID && $0.isRunning }
+        let latest = jobs.first { $0.kind == "install" && $0.modelId == runnerID }
+        guard let latest else { return nil }
+        return (latest.isRunning || latest.status == "failed") ? latest : nil
     }
 
     // MARK: - Structures and exports
 
     func structureText(jobID: String) async -> String? {
         if let cached = structureCache[jobID] { return cached }
-        guard !loadingJobIDs.contains(jobID) else { return nil }
-        loadingJobIDs.insert(jobID)
-        defer { loadingJobIDs.remove(jobID) }
         do {
             let (data, _) = try await client.download(jobID: jobID, format: "cif")
+            guard !Task.isCancelled else { return nil }
             guard let text = String(data: data, encoding: .utf8) else { return nil }
             structureCache[jobID] = text
             return text
         } catch {
+            if Task.isCancelled { return nil }
             banner = error.localizedDescription
             return nil
         }
@@ -268,7 +284,7 @@ final class AppModel: ObservableObject {
     }
 
     var totalJobsRunning: Int {
-        jobs.filter { $0.isRunning }.count
+        predictions.filter { $0.isRunning }.count
     }
 }
 

@@ -38,6 +38,7 @@ struct LibraryView: View {
                             status: app.statusEntry(for: entry),
                             installJob: app.installJob(for: entry),
                             onInstall: { Task { await app.install(entry) } },
+                            onRefresh: { Task { await app.refreshAll(quiet: true) } },
                             onCancel: {
                                 if let job = app.installJob(for: entry) {
                                     Task { await app.cancel(jobID: job.id) }
@@ -158,7 +159,7 @@ struct LibraryView: View {
                     Button {
                         NSWorkspace.shared.open(url)
                     } label: {
-                        Label("Request weights", systemImage: "arrow.up.right.square")
+                        Label("Get weights", systemImage: "arrow.up.right.square")
                     }
                     .buttonStyle(PrimaryButtonStyle())
                 }
@@ -209,6 +210,7 @@ struct CatalogCard: View {
     let status: RunnerStatus?
     let installJob: Job?
     let onInstall: () -> Void
+    let onRefresh: () -> Void
     let onCancel: () -> Void
 
     private var badge: (text: String, color: Color) {
@@ -249,6 +251,12 @@ struct CatalogCard: View {
                 }
 
                 HStack(spacing: 10) {
+                    if let device = entry.device {
+                        Label(device.uppercased(), systemImage: "memorychip")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.tertiary)
+                            .help(entry.runtime ?? device)
+                    }
                     if let license = entry.license {
                         Label(license, systemImage: "doc.badge.gearshape")
                             .font(.system(size: 9.5))
@@ -268,23 +276,43 @@ struct CatalogCard: View {
                 }
 
                 if let installJob {
-                    VStack(alignment: .leading, spacing: 5) {
-                        HStack {
-                            Text(installJob.stages.first?.message ?? "Installing…")
-                                .font(.system(size: 10, design: .monospaced))
+                    if installJob.isRunning {
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack {
+                                Text(installJob.stages.first?.message ?? "Installing…")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                Spacer()
+                                Text("\(Int(installJob.progress))%")
+                                    .font(.system(size: 9.5, design: .monospaced))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            ProgressView(value: installJob.progress, total: 100)
+                                .tint(Theme.accent)
+                            Button("Cancel install") { onCancel() }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 9.5))
                                 .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                            Spacer()
-                            Text("\(Int(installJob.progress))%")
-                                .font(.system(size: 9.5, design: .monospaced))
-                                .foregroundStyle(.tertiary)
                         }
-                        ProgressView(value: installJob.progress, total: 100)
-                            .tint(Theme.accent)
-                        Button("Cancel install") { onCancel() }
-                            .buttonStyle(.plain)
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(.secondary)
+                    } else if installJob.status == "failed" {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Setup failed")
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundStyle(Theme.danger)
+                            if let error = installJob.error {
+                                Text(error)
+                                    .font(.system(size: 9.5, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(4)
+                            }
+                            if let hint = installJob.hint {
+                                Text(hint)
+                                    .font(.system(size: 9.5))
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(3)
+                            }
+                        }
                     }
                 }
 
@@ -293,7 +321,11 @@ struct CatalogCard: View {
                 HStack(spacing: 8) {
                     if entry.installable {
                         Button {
-                            onInstall()
+                            if entry.ready {
+                                onRefresh()
+                            } else {
+                                onInstall()
+                            }
                         } label: {
                             Label(
                                 entry.ready ? "Re-check" : (entry.installed ? "Finish setup" : "Install"),
@@ -301,7 +333,7 @@ struct CatalogCard: View {
                             )
                         }
                         .buttonStyle(AdaptiveButtonStyle(primary: !entry.ready))
-                        .disabled(installJob != nil)
+                        .disabled(installJob?.isRunning == true)
                     }
 
                     if let sourceURL = entry.sourceUrl, let url = URL(string: sourceURL) {

@@ -19,6 +19,7 @@ struct SettingsView: View {
         bioRodeoCacheHours: 24
     )
     @State private var loaded = false
+    @State private var saveError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -64,8 +65,11 @@ struct SettingsView: View {
                     .buttonStyle(SecondaryButtonStyle())
                 Button {
                     Task {
+                        saveError = nil
                         if await app.saveSettings(draft) {
                             dismiss()
+                        } else {
+                            saveError = app.banner
                         }
                     }
                 } label: {
@@ -78,12 +82,13 @@ struct SettingsView: View {
                 }
                 .buttonStyle(PrimaryButtonStyle())
                 .disabled(!loaded || app.savingSettings)
+                .opacity(loaded && !app.savingSettings ? 1 : 0.45)
             }
             .padding(16)
         }
         .frame(width: 640, height: 660)
         .background(Theme.canvas)
-        .task {
+        .task(id: app.settings != nil) {
             if let settings = app.settings {
                 draft = settings
                 loaded = true
@@ -184,7 +189,14 @@ struct SettingsView: View {
                         .textFieldStyle(.roundedBorder)
                         .font(.system(size: 11, design: .monospaced))
                     Button("Check") {
-                        Task { await app.refreshAll(quiet: true) }
+                        Task {
+                            saveError = nil
+                            if await app.saveSettings(draft) {
+                                await app.refreshAll(quiet: true)
+                            } else {
+                                saveError = app.banner
+                            }
+                        }
                     }
                     .buttonStyle(SecondaryButtonStyle())
                 }

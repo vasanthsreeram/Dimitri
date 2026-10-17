@@ -53,9 +53,6 @@ struct RootView: View {
             }
         }
         .animation(.easeInOut(duration: 0.18), value: app.banner)
-        .task {
-            await app.refreshAll()
-        }
         .sheet(isPresented: $showSettings) {
             SettingsView()
                 .environmentObject(app)

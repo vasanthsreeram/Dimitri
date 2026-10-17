@@ -164,9 +164,10 @@ struct PaeHeatmap: View {
                 )
 
                 HStack {
-                    Text("Rows: aligned residue · columns: scored residue")
+                    Text("Aligned ↓ · scored →")
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
+                        .lineLimit(1)
                     Spacer()
                     Text("\(size) × \(size)")
                         .font(.system(size: 9, design: .monospaced))

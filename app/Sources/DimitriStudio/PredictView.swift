@@ -28,11 +28,15 @@ struct PredictView: View {
     }
 
     private var selectedEntry: CatalogEntry? {
-        compatibleModels.first(where: { $0.id == selectedModelID }) ?? compatibleModels.first
+        if let selected = compatibleModels.first(where: { $0.id == selectedModelID }) {
+            return selected
+        }
+        return compatibleModels.first(where: { $0.ready }) ?? compatibleModels.first
     }
 
     private var cleanedSequence: String {
-        sequence.filter { !$0.isWhitespace }.uppercased()
+        let stripped = sequence.filter { !$0.isWhitespace }
+        return entity == .ligand ? stripped : stripped.uppercased()
     }
 
     private var validation: String? {
@@ -76,13 +80,14 @@ struct PredictView: View {
         .onAppear(perform: reconcileModel)
         .onChange(of: entity) { _, _ in reconcileModel() }
         .onChange(of: app.catalog.count) { _, _ in reconcileModel() }
+        .onChange(of: readinessSignature) { _, _ in reconcileModel() }
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text("Predict a structure")
                 .font(.system(size: 26, weight: .bold))
-            Text("Paste a sequence, pick a model, run it locally. Nothing leaves this Mac.")
+            Text("Paste a sequence, pick a model, and run it on Apple Silicon.")
                 .font(.system(size: 12.5))
                 .foregroundStyle(.secondary)
         }
@@ -334,6 +339,12 @@ struct PredictView: View {
                         if let provider = entry.provider {
                             KeyValueRow(label: "Provider", value: provider)
                         }
+                        if let runtime = entry.runtime {
+                            KeyValueRow(label: "Runtime", value: runtime)
+                        }
+                        if let fallback = entry.fallback {
+                            KeyValueRow(label: "Fallback", value: fallback)
+                        }
                         if let license = entry.license {
                             KeyValueRow(label: "License", value: license)
                         }
@@ -352,7 +363,7 @@ struct PredictView: View {
                                 Button {
                                     NSWorkspace.shared.open(url)
                                 } label: {
-                                    Label("Request weights", systemImage: "arrow.up.right.square")
+                                    Label("Get weights", systemImage: "arrow.up.right.square")
                                         .font(.system(size: 11, weight: .semibold))
                                 }
                                 .buttonStyle(.plain)
@@ -382,10 +393,21 @@ struct PredictView: View {
         }
     }
 
+    private var readinessSignature: String {
+        app.catalog.map { "\($0.id):\($0.ready)" }.joined(separator: ",")
+    }
+
     private func reconcileModel() {
-        if !compatibleModels.contains(where: { $0.id == selectedModelID }) {
-            selectedModelID = compatibleModels.first?.id ?? selectedModelID
+        if let current = compatibleModels.first(where: { $0.id == selectedModelID }) {
+            if current.ready { return }
+            if let ready = compatibleModels.first(where: { $0.ready }) {
+                selectedModelID = ready.id
+            }
+            return
         }
+        selectedModelID = compatibleModels.first(where: { $0.ready })?.id
+            ?? compatibleModels.first?.id
+            ?? selectedModelID
     }
 
     private func submit() {
