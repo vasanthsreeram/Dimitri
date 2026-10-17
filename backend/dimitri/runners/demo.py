@@ -173,3 +173,101 @@ class DemoRunner(Runner):
             serial += 1
         lines.append("END")
         return "\n".join(lines) + "\n"
+
+
+class DemoWorkerRunner(Runner):
+    """Hidden test runner that goes through a real warm worker process.
+
+    The worker (workers/demo_worker.py) uses only the standard library and the
+    backend's own Python, so the worker pool, its protocol, cancellation and
+    idle eviction are tested without any model installed.
+    """
+
+    manifest = RunnerManifest(
+        id="demo-warm",
+        name="Dimitri Demo (warm worker)",
+        short_name="Demo worker",
+        version="0.1.0",
+        description="Synthetic runner served by a warm worker process. Tests only.",
+        entity_types=("protein", "rna", "dna"),
+        source_url="https://github.com/vasanthsreeram/Dimitri",
+        runtime="Synthetic (tests only)",
+        device="cpu",
+        stages=(
+            StageSpec("load", "Loading model"),
+            StageSpec("validate", "Validating input"),
+            StageSpec("fold", "Folding"),
+            StageSpec("confidence", "Confidence"),
+            StageSpec("write", "Writing outputs"),
+        ),
+        requires_weights=False,
+        visible=False,
+        warm_capable=True,
+    )
+
+    def __init__(self, env: dict[str, str] | None = None) -> None:
+        self.env = dict(env or {})
+
+    def status(self, settings: Settings) -> RunnerStatusModel:
+        return RunnerStatusModel(
+            id=self.manifest.id,
+            installed=True,
+            ready=True,
+            weights_present=True,
+            detail="Synthetic warm-worker test runner",
+            warm=bool(self.pool and self.pool.is_warm(self.manifest.id)),
+        )
+
+    def install(
+        self, settings: Settings, progress: ProgressFn, control: JobControl
+    ) -> InstallResult:
+        return InstallResult(message="Nothing to install")
+
+    def worker_spec(self, settings: Settings):
+        import os
+        import sys
+
+        from ..workers import WorkerSpec
+
+        worker = Path(__file__).resolve().parent / "workers" / "demo_worker.py"
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PYTHONUNBUFFERED": "1"}
+        env.update(self.env)
+        return WorkerSpec(
+            runner_id=self.manifest.id,
+            argv=(sys.executable, str(worker)),
+            cwd=str(worker.parent),
+            env=tuple(sorted(env.items())),
+            ready_timeout=30.0,
+        )
+
+    def run(
+        self,
+        request,
+        workdir: Path,
+        settings: Settings,
+        progress: ProgressFn,
+        control: JobControl,
+    ) -> RunResult:
+        if self.pool is None:
+            raise RuntimeError("DemoWorkerRunner needs a worker pool")
+
+        def on_event(event: dict) -> None:
+            progress(event.get("stage") or "load", float(event.get("fraction") or 0), event.get("message"))
+
+        payload = {
+            "type": "predict",
+            "job": workdir.parent.name,
+            "workdir": str(workdir),
+            "request": {"sequence": request.sequence, "name": request.name},
+        }
+        result, info = self.pool.run(self.worker_spec(settings), payload, on_event, control)
+        return RunResult(
+            pdb_text=result["pdb_text"],
+            metrics=result["metrics"],
+            per_residue_plddt=result["per_residue_plddt"],
+            note="Synthetic structure from the warm-worker demo. Not a prediction.",
+            device=result.get("device"),
+            warm=bool(info["warm"]),
+            timings=result.get("timings", {}),
+            extra={"worker_pid": result.get("worker_pid"), "loaded_at": result.get("loaded_at")},
+        )

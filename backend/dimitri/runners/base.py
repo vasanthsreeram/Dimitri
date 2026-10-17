@@ -19,10 +19,13 @@ import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import TYPE_CHECKING, Callable, Sequence
 
 from ..config import Settings
 from ..models import InstallResult, RunResult, RunnerManifestModel, RunnerStatusModel, Stage
+
+if TYPE_CHECKING:
+    from ..workers import WorkerPool, WorkerSpec
 
 
 class RunnerError(RuntimeError):
@@ -64,6 +67,8 @@ class RunnerManifest:
     requires_weights: bool = True
     setup_hint: str | None = None
     visible: bool = True
+    # True when the runner can keep its model loaded in a warm worker.
+    warm_capable: bool = False
 
     def to_model(self, settings: Settings) -> RunnerManifestModel:
         weight_dir = (
@@ -89,6 +94,7 @@ class RunnerManifest:
             setup_hint=self.setup_hint,
             stages=[Stage(id=s.id, name=s.name) for s in self.stages],
             visible=self.visible,
+            warm_capable=self.warm_capable,
         )
 
 
@@ -138,6 +144,21 @@ class JobControl:
 
 class Runner(ABC):
     manifest: RunnerManifest
+    # Set by the registry. Runners that keep a model loaded run through it.
+    pool: "WorkerPool | None" = None
+
+    def worker_spec(self, settings: Settings) -> "WorkerSpec | None":
+        """How to launch this runner's warm worker; None if it has none."""
+        return None
+
+    def prewarm(self, settings: Settings) -> bool:
+        """Start loading the model in the background so the next job is fast."""
+        if self.pool is None or not settings.warm_workers:
+            return False
+        if not self.status(settings).ready:
+            return False
+        spec = self.worker_spec(settings)
+        return self.pool.prewarm(spec) if spec else False
 
     @abstractmethod
     def status(self, settings: Settings) -> RunnerStatusModel: ...
@@ -228,6 +249,40 @@ def run_command(
 
 def tail_lines(lines: list[str], limit: int = 60) -> list[str]:
     return lines[-limit:]
+
+
+def git_head(repo: Path) -> str | None:
+    """Short commit of a checkout, read from .git without running git."""
+    git = repo / ".git"
+    try:
+        head = (git / "HEAD").read_text(encoding="utf-8").strip()
+        if head.startswith("ref: "):
+            ref = git / head[5:]
+            if ref.exists():
+                return ref.read_text(encoding="utf-8").strip()[:7]
+            packed = git / "packed-refs"
+            for line in packed.read_text(encoding="utf-8").splitlines():
+                if line.endswith(" " + head[5:]):
+                    return line.split()[0][:7]
+            return None
+        return head[:7]
+    except OSError:
+        return None
+
+
+def base_env(*paths: Path, extra: dict[str, str] | None = None) -> dict[str, str]:
+    """A small, predictable environment for model processes."""
+    env = {
+        "PATH": ":".join(
+            [str(p) for p in paths] + ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        ),
+        "HOME": str(Path.home()),
+        "PYTHONUNBUFFERED": "1",
+        "LANG": "en_US.UTF-8",
+    }
+    if extra:
+        env.update(extra)
+    return env
 
 
 @dataclass

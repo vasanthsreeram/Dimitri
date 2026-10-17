@@ -7,18 +7,24 @@ methods on :class:`~dimitri.runners.base.Runner`.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from ..config import Settings
 from ..models import RunnerManifestModel, RunnerStatusModel
 from .alphafold3_mac import AlphaFold3MacRunner
 from .base import Runner
-from .demo import DemoRunner
+from .demo import DemoRunner, DemoWorkerRunner
 from .openfold3 import OpenFold3Runner
 from .rhofold import RhoFoldRunner
 
+if TYPE_CHECKING:
+    from ..workers import WorkerPool
+
 
 class RunnerRegistry:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, pool: "WorkerPool | None" = None) -> None:
         self.settings = settings
+        self.pool = pool
         self._runners: dict[str, Runner] = {
             runner.manifest.id: runner
             for runner in (
@@ -26,8 +32,16 @@ class RunnerRegistry:
                 RhoFoldRunner(settings),
                 OpenFold3Runner(settings),
                 DemoRunner(),
+                DemoWorkerRunner(),
             )
         }
+        for runner in self._runners.values():
+            runner.pool = pool
+
+    def register(self, runner: Runner) -> None:
+        """Add or replace a runner (tests use this for configured demos)."""
+        runner.pool = self.pool
+        self._runners[runner.manifest.id] = runner
 
     def get(self, runner_id: str) -> Runner:
         if runner_id not in self._runners:

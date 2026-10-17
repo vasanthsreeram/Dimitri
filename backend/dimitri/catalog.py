@@ -19,6 +19,7 @@ import httpx
 from .config import Settings
 from .models import CatalogEntry
 from .runners import RunnerRegistry
+from .sizes import DiskSizer
 
 BIO_RODEO_BASE = "https://bio.rodeo"
 BIO_RODEO_TTL_HOURS = 24
@@ -196,42 +197,38 @@ def load_local_catalog() -> list[dict[str, Any]]:
     return json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
 
 
-def _dir_size_bytes(path: Path) -> int:
-    if not path.exists():
-        return 0
-    total = 0
-    for child in path.rglob("*"):
-        try:
-            if child.is_file():
-                total += child.stat().st_size
-        except OSError:
-            continue
-    return total
-
-
-def _entry_size(entry: dict[str, Any], settings: Settings) -> int:
+def entry_paths(entry: dict[str, Any], settings: Settings) -> list[Path]:
+    """Directories a catalogue entry occupies on disk."""
     runner_id = entry.get("runner_id")
     if runner_id == "alphafold3-mac":
-        return _dir_size_bytes(Path(settings.af3_repo).expanduser()) + _dir_size_bytes(
-            Path(settings.af3_weights_dir).expanduser()
-        )
+        return [
+            Path(settings.af3_repo).expanduser(),
+            Path(settings.mac_af3_repo).expanduser(),
+            Path(settings.af3_weights_dir).expanduser(),
+            Path("~/.alphafold3/shards").expanduser(),
+        ]
     if runner_id == "rhofold":
-        return _dir_size_bytes(Path(settings.rhofold_repo).expanduser())
+        return [Path(settings.rhofold_repo).expanduser()]
     if runner_id == "openfold3":
-        return _dir_size_bytes(Path(settings.openfold3_repo).expanduser()) + _dir_size_bytes(
-            Path(settings.openfold3_cache).expanduser()
-        )
-    return 0
+        return [
+            Path(settings.openfold3_repo).expanduser(),
+            Path(settings.openfold3_cache).expanduser(),
+        ]
+    return []
 
 
 class CatalogService:
     def __init__(
-        self, settings: Settings, registry: RunnerRegistry, adapter: BioRodeoAdapter | None = None
+        self,
+        settings: Settings,
+        registry: RunnerRegistry,
+        adapter: BioRodeoAdapter | None = None,
+        sizer: DiskSizer | None = None,
     ) -> None:
         self.settings = settings
         self.registry = registry
         self.adapter = adapter or BioRodeoAdapter(settings)
-        self._size_cache: dict[str, tuple[float, int]] = {}
+        self.sizer = sizer or DiskSizer()
 
     def _snapshot(self) -> dict[str, Any]:
         if SNAPSHOT_FILE.exists():
@@ -253,15 +250,8 @@ class CatalogService:
         return chosen, {entry["slug"]: entry for entry in chosen.get("entries", [])}
 
     def _entry_size(self, entry: dict[str, Any]) -> int:
-        """Disk walk with a short cache; status polling must not rescan every 5s."""
-        key = entry.get("runner_id") or entry["id"]
-        now = time.time()
-        cached = self._size_cache.get(key)
-        if cached and now - cached[0] < 60:
-            return cached[1]
-        size = _entry_size(entry, self.settings)
-        self._size_cache[key] = (now, size)
-        return size
+        """Cached; directory walks happen on the sizer's background thread."""
+        return self.sizer.size(entry_paths(entry, self.settings))
 
     def sources(self) -> dict[str, Any]:
         rodeo, records = self.rodeo_records()
@@ -313,6 +303,8 @@ class CatalogService:
                     weight_note=manifest.weight_note if manifest else raw.get("weight_note"),
                     weight_request_url=manifest.weight_request_url if manifest else None,
                     weight_dir=manifest.weight_dir if manifest else None,
+                    status_detail=status.detail if status else None,
+                    warm=bool(status and status.warm),
                 )
             )
         sources = {

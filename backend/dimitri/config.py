@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 DEFAULT_PORT = 8642
 
 
@@ -31,10 +31,16 @@ class Settings:
     lms_base_url: str = "http://localhost:1234/v1"
     af3_repo: str = ""
     af3_weights_dir: str = ""
+    mac_af3_repo: str = ""
     rhofold_repo: str = ""
     openfold3_repo: str = ""
     openfold3_cache: str = ""
     bio_rodeo_cache_hours: int = 24
+    # Keep models loaded in warm worker processes between jobs.
+    warm_workers: bool = True
+    # Minutes a loaded model stays warm after its last job. None follows the
+    # device profile; -1 keeps it until the backend stops.
+    keep_warm_minutes: int | None = None
 
     def __post_init__(self) -> None:
         home = Path(self.home).expanduser()
@@ -45,7 +51,9 @@ class Settings:
         self.af3_weights_dir = self.af3_weights_dir or str(
             Path("~/.alphafold3/weights/model").expanduser()
         )
-        self.rhofold_repo = self.rhofold_repo or str(Path(self.models_dir) / "rhofold")
+        self.mac_af3_repo = self.mac_af3_repo or str(Path(self.models_dir) / "mac-af3")
+        # rhofold-mac checkout (github.com/vasanthsreeram/rhofold-mac).
+        self.rhofold_repo = self.rhofold_repo or str(Path(self.models_dir) / "rhofold-mac")
         self.openfold3_repo = self.openfold3_repo or str(
             Path(self.models_dir) / "openfold-3-mlx"
         )
@@ -83,6 +91,17 @@ class Settings:
             json.dumps(asdict(self), indent=2) + "\n", encoding="utf-8"
         )
 
+    def keep_warm_seconds(self, device_default_minutes: int) -> float | None:
+        """Seconds a warm worker may idle; None means until the backend stops."""
+        if not self.warm_workers:
+            return 0.0
+        minutes = self.keep_warm_minutes
+        if minutes is None:
+            minutes = device_default_minutes
+        if minutes < 0:
+            return None
+        return float(minutes) * 60.0
+
     def update(self, patch: dict[str, Any]) -> "Settings":
         allowed = set(asdict(self))
         for key, value in patch.items():
@@ -106,4 +125,10 @@ class Settings:
             except json.JSONDecodeError:
                 data = {}
         data["home"] = str(root)
+        # Phase 1 pointed RhoFold at a bare ml4bio/RhoFold checkout under
+        # models/rhofold. The runner now uses rhofold-mac; drop the old default.
+        old = data.get("rhofold_repo")
+        models_dir = data.get("models_dir") or str(root / "models")
+        if old and Path(old).expanduser() == Path(models_dir).expanduser() / "rhofold":
+            data.pop("rhofold_repo")
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
