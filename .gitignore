@@ -1,0 +1,35 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Swift
+.build/
+.swiftpm/
+*.xcodeproj
+*.xcworkspace
+
+# Model weights and local data — never commit these
+*.bin
+*.bin.zst
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+models/
+results/
+data/
+DimitriHome/
+
+# Secrets and local config
+.env
+.env.*
+secrets.json
+
+# macOS
+.DS_Store

@@ -1,0 +1,62 @@
+[
+  {
+    "id": "alphafold3-mac",
+    "name": "AlphaFold 3",
+    "runner_id": "alphafold3-mac",
+    "rodeo_slug": "alphafold-3",
+    "provider": "Google DeepMind",
+    "description": "All-atom structure prediction for proteins, nucleic acids and ligands on Apple Silicon.",
+    "tags": ["protein", "RNA", "DNA", "ligand", "complexes", "PAE"],
+    "license": "Apache-2.0 (code)"
+  },
+  {
+    "id": "rhofold",
+    "name": "RhoFold+",
+    "runner_id": "rhofold",
+    "rodeo_slug": "rhofold-plus",
+    "provider": "CUHK Shen Lab",
+    "description": "RNA-only 3D structure prediction with a language-model-based deep learning approach.",
+    "tags": ["RNA", "pLDDT"],
+    "license": "Apache-2.0"
+  },
+  {
+    "id": "openfold3",
+    "name": "OpenFold3",
+    "runner_id": "openfold3",
+    "rodeo_slug": "openfold3",
+    "provider": "AlQuraishi Lab",
+    "description": "Open reproduction of AlphaFold 3, accelerated with MLX for Apple Silicon.",
+    "tags": ["protein", "RNA", "DNA", "open weights"],
+    "license": "Apache-2.0"
+  },
+  {
+    "id": "alphafold2",
+    "name": "AlphaFold 2",
+    "runner_id": null,
+    "rodeo_slug": "alphafold-2",
+    "provider": "Google DeepMind",
+    "description": "The original high-accuracy protein folding model. Catalog entry only: no Dimitri runner yet.",
+    "tags": ["protein", "reference"],
+    "license": null
+  },
+  {
+    "id": "esmfold",
+    "name": "ESMFold",
+    "runner_id": null,
+    "rodeo_slug": "esmfold",
+    "provider": "Meta AI",
+    "description": "Fast single-sequence protein folding from ESM embeddings. Catalog entry only: no Dimitri runner yet.",
+    "tags": ["protein", "fast", "reference"],
+    "license": null
+  },
+  {
+    "id": "rosettafold",
+    "name": "RoseTTAFold",
+    "runner_id": null,
+    "rodeo_slug": "rosettafold",
+    "provider": "Baker Lab",
+    "description": "Three-track protein structure prediction network. Catalog entry only: no Dimitri runner yet.",
+    "tags": ["protein", "reference"],
+    "license": null
+  }
+]

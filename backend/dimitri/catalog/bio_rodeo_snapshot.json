@@ -1,0 +1,77 @@
+{
+  "source": "bio.rodeo",
+  "base_url": "https://bio.rodeo",
+  "fetched_at": 1792233556.3469791,
+  "mode": "html + schema.org JSON-LD",
+  "api": null,
+  "verified_at": "2026-10-17",
+  "entries": [
+    {
+      "slug": "alphafold-3",
+      "url": "https://bio.rodeo/models/alphafold-3",
+      "name": "AlphaFold 3",
+      "description": "Diffusion-based structure prediction model for biomolecular complexes, spanning proteins with DNA, RNA, small molecules, ions, and modified residues.",
+      "provider": "Google DeepMind",
+      "citation": "Accurate structure prediction of biomolecular interactions with AlphaFold 3",
+      "openness": 28,
+      "license": "Apache-2.0",
+      "application_category": "Scientific Software"
+    },
+    {
+      "slug": "rhofold-plus",
+      "url": "https://bio.rodeo/models/rhofold-plus",
+      "name": "RhoFold+",
+      "description": "End-to-end RNA 3D structure prediction from sequence alone, coupling the RNA-FM language model with an Invariant Point Attention structure module.",
+      "provider": "ml4bio",
+      "citation": "Accurate RNA 3D structure prediction using a language model-based deep learning approach",
+      "openness": 65,
+      "license": "Apache-2.0",
+      "application_category": "Scientific Software"
+    },
+    {
+      "slug": "openfold3",
+      "url": "https://bio.rodeo/models/openfold3",
+      "name": "OpenFold3",
+      "description": "Open-source Apache-2.0 reproduction of AlphaFold3 that predicts all-atom structures of proteins, RNA, DNA, small molecules, and their complexes.",
+      "provider": "Aqlaboratory",
+      "citation": "OpenFold3-preview",
+      "openness": 92,
+      "license": "Apache-2.0",
+      "application_category": "Scientific Software"
+    },
+    {
+      "slug": "alphafold-2",
+      "url": "https://bio.rodeo/models/alphafold-2",
+      "name": "AlphaFold 2",
+      "description": "Protein structure prediction model that folds amino acid sequences into 3D structures with atomic accuracy, scoring a median GDT of 92.4 at CASP14.",
+      "provider": "Google DeepMind",
+      "citation": "Highly accurate protein structure prediction with AlphaFold",
+      "openness": 61,
+      "license": "Apache-2.0",
+      "application_category": "Scientific Software"
+    },
+    {
+      "slug": "esmfold",
+      "url": "https://bio.rodeo/models/esmfold",
+      "name": "ESMFold",
+      "description": "Protein structure prediction from a single sequence, with no multiple sequence alignment. Folds a 384-residue protein in 14.2 seconds on one GPU.",
+      "provider": "Meta AI",
+      "citation": "Evolutionary-scale prediction of atomic level protein structure with a language model",
+      "openness": 74,
+      "license": "MIT",
+      "application_category": "Scientific Software"
+    },
+    {
+      "slug": "rosettafold",
+      "url": "https://bio.rodeo/models/rosettafold",
+      "name": "RoseTTAFold",
+      "description": "Protein structure and complex prediction from sequence, in a three-track network that reasons over alignments, distances, and 3D coordinates at once.",
+      "provider": "Baker Lab",
+      "citation": "Accurate prediction of protein structures and interactions using a 3-track neural network",
+      "openness": 52,
+      "license": "MIT",
+      "application_category": "Scientific Software"
+    }
+  ],
+  "note": "bio.rodeo has no public API (checked 2026-10-17). Records are parsed from public model pages; fields may change without notice."
+}
