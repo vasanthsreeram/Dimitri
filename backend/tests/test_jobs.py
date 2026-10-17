@@ -41,10 +41,15 @@ def test_demo_job_completes_with_metrics_and_stages(client: TestClient) -> None:
     assert 0 < result["metrics"]["ptm"] <= 1
     assert result["metrics"]["iptm"] is None
     assert len(result["per_residue_plddt"]) == 29
-    assert len(result["pae"]) == 29
+    # The PAE matrix is served separately so job records stay small.
+    assert result["pae"] is None
+    assert result["pae_size"] == 29
+    pae = client.get(f"/api/jobs/{job['id']}/pae").json()
+    assert pae["size"] == 29 and len(pae["matrix"]) == 29 and pae["stride"] == 1
     assert result["residues"] == 29
     assert result["atoms"] == 29
-    assert result["format"] == "cif"
+    assert result["format"] == "pdb"  # the demo writes PDB; that is its native format
+    assert result["timings"]["queue_s"] >= 0
     assert result["device"] == "cpu"  # synthetic test runner
     assert done["log_tail"]
 

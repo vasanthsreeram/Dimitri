@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .config import Settings
 from .models import (
+    CreateJobsRequest,
     Job,
     PredictionRequest,
     Stage,
@@ -59,6 +60,24 @@ class JobManager:
         )
         self._queue.put(job)
         return job
+
+    def submit_many(self, request: CreateJobsRequest) -> list[Job]:
+        """Queue the same input on several models (for comparison)."""
+        jobs: list[Job] = []
+        for model_id in dict.fromkeys(request.model_ids):
+            jobs.append(
+                self.submit_prediction(
+                    PredictionRequest(
+                        model_id=model_id,
+                        entity_type=request.entity_type,
+                        sequence=request.sequence,
+                        name=request.name,
+                        seed=request.seed,
+                        samples=request.samples,
+                    )
+                )
+            )
+        return jobs
 
     def submit_install(self, runner_id: str, name: str) -> Job:
         runner = self.registry.get(runner_id)
@@ -136,45 +155,10 @@ class JobManager:
             started_at=started,
             current_stage=job.stages[0].id if job.stages else None,
         )
-        total = max(1, len(job.stages))
-        last_save = {"t": 0.0}
-
         def progress(stage_id: str, fraction: float, message: str | None) -> None:
             if control.cancelled:
                 raise RunnerError("cancelled")
-            current = self.store.get(job.id)
-            if current is None:
-                return
-            stages = current.stages
-            index = next(
-                (i for i, stage in enumerate(stages) if stage.id == stage_id), None
-            )
-            if index is None:
-                return
-            for i, stage in enumerate(stages):
-                if i < index:
-                    stage.status = "done"
-                    stage.progress = 1.0
-                elif i == index:
-                    stage.status = "running"
-                    stage.progress = max(0.0, min(1.0, fraction))
-                    if message:
-                        stage.message = message[:200]
-            overall = round(((index + fraction) / total) * 100, 1)
-            log = list(current.log_tail)
-            if message:
-                log.append(message[:200])
-                log = log[-80:]
-            now = time.time()
-            if now - last_save["t"] > 0.2 or fraction >= 1.0:
-                last_save["t"] = now
-                self.store.update(
-                    job.id,
-                    stages=stages,
-                    progress=overall,
-                    current_stage=stage_id,
-                    log_tail=log,
-                )
+            self.store.progress(job.id, stage_id, fraction, message)
 
         try:
             if job.kind == "install":
@@ -210,6 +194,10 @@ class JobManager:
             )
             if control.cancelled:
                 raise RunnerError("cancelled")
+            run_result.timings = {
+                "queue_s": round(max(0.0, started - job.created_at), 2),
+                **run_result.timings,
+            }
             result = self.store.write_result(
                 job.id,
                 run_result,
@@ -237,7 +225,7 @@ class JobManager:
             if str(exc) == "cancelled" or control.cancelled:
                 self._cancel(job.id)
             else:
-                self._fail(job.id, str(exc), None)
+                self._fail(job.id, str(exc), getattr(exc, "hint", None))
         except Exception as exc:  # keep the reason visible in the UI
             self._fail(
                 job.id,

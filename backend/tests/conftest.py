@@ -15,8 +15,11 @@ def home(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
-def client(home: Path) -> TestClient:
-    return TestClient(create_app(home))
+def client(home: Path):
+    # The context manager runs the app's lifespan, so warm workers started by a
+    # test are stopped when it ends.
+    with TestClient(create_app(home)) as test_client:
+        yield test_client
 
 
 def wait_for_job(client: TestClient, job_id: str, timeout: float = 20.0) -> dict:
