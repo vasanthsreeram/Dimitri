@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Start the Dimitri backend on http://127.0.0.1:8642
+# Start only the backend on http://127.0.0.1:8642 (for scripts or debugging).
+# The Mac app normally starts and stops it for you; if this one is running,
+# the app uses it and leaves it running when it quits.
 set -euo pipefail
 cd "$(dirname "$0")/../backend"
 
@@ -13,4 +15,4 @@ if [ ! -x .venv/bin/python ]; then
   uv sync --extra dev
 fi
 
-exec .venv/bin/uvicorn dimitri.main:app --host 127.0.0.1 --port 8642
+exec .venv/bin/python -m dimitri --port 8642

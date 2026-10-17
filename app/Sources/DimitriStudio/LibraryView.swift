@@ -2,383 +2,420 @@ import AppKit
 import SwiftUI
 
 struct LibraryView: View {
-    @EnvironmentObject private var app: AppModel
+    @Environment(AppModel.self) private var app
 
-    private var installedCount: Int {
-        app.catalog.filter { $0.installed }.count
+    private var runnable: [CatalogEntry] {
+        app.predictableModels.sorted { ($0.ready ? 0 : 1) < ($1.ready ? 0 : 1) }
     }
-
-    private var readyCount: Int {
-        app.catalog.filter { $0.ready }.count
-    }
-
-    private var totalDisk: Int {
-        app.status?.storage.reduce(0) { $0 + $1.bytes } ?? 0
-    }
-
-    private var af3: CatalogEntry? {
-        app.catalog.first(where: { $0.id == "alphafold3-mac" })
-    }
+    private var reference: [CatalogEntry] { app.catalog.filter { !$0.installable } }
+    private var diskUsed: Int { app.status?.storage.reduce(0) { $0 + $1.bytes } ?? 0 }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 22) {
                 header
-                summaryRow
-                if let af3, !af3.ready {
-                    weightRequestBanner(af3)
-                }
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 335), spacing: 16)],
-                    spacing: 16
-                ) {
-                    ForEach(app.catalog) { entry in
-                        CatalogCard(
-                            entry: entry,
-                            status: app.statusEntry(for: entry),
-                            installJob: app.installJob(for: entry),
-                            onInstall: { Task { await app.install(entry) } },
-                            onRefresh: { Task { await app.refreshAll(quiet: true) } },
-                            onCancel: {
-                                if let job = app.installJob(for: entry) {
-                                    Task { await app.cancel(jobID: job.id) }
-                                }
-                            }
-                        )
+                summary
+                if app.catalog.isEmpty {
+                    LazyVGrid(columns: columns, spacing: 16) {
+                        ForEach(0..<3, id: \.self) { _ in
+                            RoundedRectangle(cornerRadius: 14).fill(Color.primary.opacity(0.05)).frame(height: 230).shimmering()
+                        }
+                    }
+                } else {
+                    LazyVGrid(columns: columns, alignment: .leading, spacing: 16) {
+                        ForEach(runnable) { entry in
+                            LibraryCard(entry: entry)
+                        }
                     }
                 }
-                sourcesFooter
+                if !reference.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("More models on bio.rodeo")
+                            .font(.headline)
+                        Text("Catalogue entries without a Dimitri runner yet, here for reference.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 250), spacing: 12, alignment: .top)], spacing: 12) {
+                            ForEach(reference) { entry in
+                                ReferenceCard(entry: entry)
+                            }
+                        }
+                    }
+                }
+                sources
             }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 22)
-            .frame(maxWidth: 1240, alignment: .leading)
+            .padding(.horizontal, 28)
+            .padding(.vertical, 24)
+            .frame(maxWidth: 1260)
             .frame(maxWidth: .infinity)
         }
+        .navigationTitle("Library")
+        .navigationSubtitle("\(runnable.filter(\.ready).count) of \(runnable.count) models ready")
+        .toolbar {
+            ToolbarItem {
+                Button {
+                    Task { await app.refreshCatalog() }
+                } label: {
+                    if app.refreshingCatalog {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Label("Refresh Catalogue", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                }
+                .help("Re-read model pages from bio.rodeo")
+                .disabled(app.refreshingCatalog)
+            }
+        }
+        .task { await app.refreshStatus() }
     }
+
+    private var columns: [GridItem] { [GridItem(.adaptive(minimum: 360), spacing: 16, alignment: .top)] }
 
     private var header: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Model library")
-                    .font(.system(size: 26, weight: .bold))
-                Text("Browse structure models, install a runner, and see what is on disk.")
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Model library")
+                .font(.system(size: 28, weight: .bold))
+            Text("Install a model once; it runs on this Mac from then on. Loaded models stay warm between jobs so the next run starts at once.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var summary: some View {
+        HStack(spacing: 14) {
+            SummaryTile(icon: "checkmark.seal", title: "Ready", value: "\(runnable.filter(\.ready).count) / \(runnable.count)", caption: "models installed and runnable")
+            SummaryTile(icon: "bolt", title: "Loaded now", value: "\(app.workers.count)", caption: app.workers.isEmpty ? "loads on the first job" : app.workers.map { app.shortName(for: $0.runnerId) }.joined(separator: ", "))
+            SummaryTile(icon: "internaldrive", title: "On disk", value: diskUsed > 0 ? Format.bytes(diskUsed) : "—", caption: "models, results and cache")
+            if let device = app.status?.device {
+                SummaryTile(icon: "memorychip", title: device.chip, value: "\(Int(device.memoryGb)) GB", caption: "\(Format.score(device.gpuBudgetGb)) GB usable for models")
             }
-            Spacer()
-            Button {
-                Task { await app.refreshCatalog() }
-            } label: {
-                HStack(spacing: 6) {
-                    if app.refreshingCatalog {
-                        ProgressView().controlSize(.mini)
-                    } else {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.system(size: 10, weight: .semibold))
-                    }
-                    Text("Refresh catalog")
+        }
+    }
+
+    private var sources: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "link").foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Catalogue: model pages on bio.rodeo (no public API; read from its pages and cached), plus Dimitri's own runner list.")
+                if let note = app.catalogSources?.bioRodeo?.note {
+                    Text(note).foregroundStyle(.tertiary)
                 }
             }
-            .buttonStyle(SecondaryButtonStyle())
-            .disabled(app.refreshingCatalog)
-        }
-    }
-
-    private var summaryRow: some View {
-        HStack(spacing: 12) {
-            summaryCard(
-                title: "Catalogue",
-                value: "\(app.catalog.count)",
-                caption: "\(installedCount) installed · \(readyCount) ready"
-            )
-            summaryCard(
-                title: "Disk used",
-                value: formatBytes(totalDisk),
-                caption: "Models, results and cache"
-            )
-            summaryCard(
-                title: "Source",
-                value: "bio.rodeo",
-                caption: "\(app.catalogSources?.bioRodeo?.entries ?? 0) matching models"
-            )
-            if let status = app.status {
-                summaryCard(
-                    title: "LM Studio",
-                    value: status.lmStudio.reachable ? "Online" : "Offline",
-                    caption: status.lmStudio.reachable
-                        ? "\(status.lmStudio.models.count) local models"
-                        : "Status only · port 1234"
-                )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            Spacer()
+            if let base = app.catalogSources?.bioRodeo?.baseUrl, let url = URL(string: base) {
+                Link("bio.rodeo", destination: url).font(.caption)
             }
         }
+        .padding(.top, 4)
     }
+}
 
-    private func summaryCard(title: String, value: String, caption: String) -> some View {
+private struct SummaryTile: View {
+    let icon: String
+    let title: String
+    let value: String
+    let caption: String
+
+    var body: some View {
         Card(padding: 14) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .font(.system(size: 9.5, weight: .semibold))
-                    .textCase(.uppercase)
-                    .tracking(0.5)
-                    .foregroundStyle(.secondary)
-                Text(value)
-                    .font(.system(size: 20, weight: .semibold, design: .rounded))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                Text(caption)
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 18))
+                    .foregroundStyle(.tint)
+                    .frame(width: 26)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Text(value)
+                        .font(.title3.weight(.semibold).monospacedDigit())
+                        .contentTransition(.numericText())
+                    Text(caption)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
             }
         }
         .frame(maxWidth: .infinity)
     }
-
-    private func weightRequestBanner(_ entry: CatalogEntry) -> some View {
-        Card(padding: 15) {
-            HStack(alignment: .top, spacing: 13) {
-                Image(systemName: "key.horizontal")
-                    .font(.system(size: 18))
-                    .foregroundStyle(Theme.amber)
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("AlphaFold 3 needs DeepMind's weights")
-                        .font(.system(size: 12.5, weight: .semibold))
-                    Text(entry.weightNote ?? "Request access, then place af3.bin.zst in the weights directory.")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if let directory = entry.weightDir {
-                        Text(directory)
-                            .font(.system(size: 10.5, design: .monospaced))
-                            .foregroundStyle(.tertiary)
-                            .textSelection(.enabled)
-                    }
-                }
-                Spacer()
-                if let requestURL = entry.weightRequestUrl, let url = URL(string: requestURL) {
-                    Button {
-                        NSWorkspace.shared.open(url)
-                    } label: {
-                        Label("Get weights", systemImage: "arrow.up.right.square")
-                    }
-                    .buttonStyle(PrimaryButtonStyle())
-                }
-            }
-        }
-    }
-
-    private var sourcesFooter: some View {
-        Card(padding: 14) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "link")
-                    .foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Catalog sources")
-                        .font(.system(size: 11, weight: .semibold))
-                    if let source = app.catalogSources?.bioRodeo {
-                        Text(
-                            "bio.rodeo · \(source.mode ?? "snapshot")"
-                                + (source.api == nil ? " · no public API" : " · API")
-                        )
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.secondary)
-                        if let note = source.note {
-                            Text(note)
-                                .font(.system(size: 10))
-                                .foregroundStyle(.tertiary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                    Text("Local runner metadata from backend/dimitri/catalog/models.json")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                }
-                Spacer()
-                if let base = app.catalogSources?.bioRodeo?.baseUrl, let url = URL(string: base) {
-                    Button("bio.rodeo") {
-                        NSWorkspace.shared.open(url)
-                    }
-                    .buttonStyle(SecondaryButtonStyle())
-                }
-            }
-        }
-    }
 }
 
-struct CatalogCard: View {
+struct LibraryCard: View {
+    @Environment(AppModel.self) private var app
     let entry: CatalogEntry
-    let status: RunnerStatus?
-    let installJob: Job?
-    let onInstall: () -> Void
-    let onRefresh: () -> Void
-    let onCancel: () -> Void
 
-    private var badge: (text: String, color: Color) {
-        if entry.ready { return ("Ready", Theme.accent) }
-        if entry.installed { return ("Weights needed", Theme.amber) }
-        if entry.installable { return ("Not installed", .secondary) }
-        return ("Catalog only", .secondary)
+    private var installJob: JobSummary? {
+        app.installJobs.first { $0.modelId == entry.modelID && ($0.isActive || $0.status == "failed") }
     }
+    private var installing: Bool { installJob?.isActive == true }
+    private var warm: Bool { app.isWarm(entry.modelID) }
+    private var status: RunnerStatus? { app.runnerStatus[entry.modelID] }
 
     var body: some View {
-        Card {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top, spacing: 10) {
-                    VStack(alignment: .leading, spacing: 3) {
+        Card(highlighted: warm) {
+            VStack(alignment: .leading, spacing: 13) {
+                HStack(alignment: .top, spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Theme.brand)
+                            .frame(width: 40, height: 40)
+                        Image(systemName: icon)
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundStyle(.white)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
                         Text(entry.name)
-                            .font(.system(size: 15, weight: .semibold))
+                            .font(.title3.weight(.semibold))
                         Text(entry.provider ?? "Independent")
-                            .font(.system(size: 10.5))
+                            .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
-                    StatusPill(text: badge.text, color: badge.color, filled: true)
+                    badge
                 }
 
                 Text(entry.description)
-                    .font(.system(size: 11.5))
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                     .lineLimit(4)
                     .fixedSize(horizontal: false, vertical: true)
 
-                if !entry.tags.isEmpty {
-                    HStack(spacing: 5) {
-                        ForEach(entry.tags.prefix(4), id: \.self) { tag in
-                            TagChip(text: tag)
-                        }
-                        Spacer()
+                HStack(spacing: 6) {
+                    ForEach(entry.entityTypes, id: \.self) { type in
+                        Chip(text: EntityKind(rawValue: type)?.label ?? type)
+                    }
+                    Spacer()
+                    if let runtime = entry.runtime {
+                        Chip(text: runtime, icon: "cpu", tint: .accentColor)
                     }
                 }
 
-                HStack(spacing: 10) {
-                    if let device = entry.device {
-                        Label(device.uppercased(), systemImage: "memorychip")
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(.tertiary)
-                            .help(entry.runtime ?? device)
-                    }
-                    if let license = entry.license {
-                        Label(license, systemImage: "doc.badge.gearshape")
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(.tertiary)
-                    }
-                    if let openness = entry.openness {
-                        Label("\(openness)/100 open", systemImage: "lock.open")
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(.tertiary)
+                if let job = installJob {
+                    InstallProgress(job: job)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+
+                if !entry.ready, let note = entry.weightNote, entry.installed || entry.modelID == "alphafold3-mac" {
+                    WeightsNote(entry: entry, note: note)
+                }
+
+                Divider()
+
+                HStack(spacing: 8) {
+                    primaryAction
+                    if warm {
+                        Button {
+                            Task { await app.release(entry.modelID) }
+                        } label: {
+                            Label("Unload", systemImage: "eject")
+                        }
+                        .buttonStyle(SubtleButtonStyle())
+                        .help("Free the memory this loaded model is using")
                     }
                     Spacer()
                     if entry.sizeBytes > 0 {
-                        Text(formatBytes(entry.sizeBytes))
-                            .font(.system(size: 9.5, design: .monospaced))
-                            .foregroundStyle(.tertiary)
+                        Text(Format.bytes(entry.sizeBytes))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
                     }
-                }
-
-                if let installJob {
-                    if installJob.isRunning {
-                        VStack(alignment: .leading, spacing: 5) {
-                            HStack {
-                                Text(installJob.stages.first?.message ?? "Installing…")
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                Spacer()
-                                Text("\(Int(installJob.progress))%")
-                                    .font(.system(size: 9.5, design: .monospaced))
-                                    .foregroundStyle(.tertiary)
-                            }
-                            ProgressView(value: installJob.progress, total: 100)
-                                .tint(Theme.accent)
-                            Button("Cancel install") { onCancel() }
-                                .buttonStyle(.plain)
-                                .font(.system(size: 9.5))
-                                .foregroundStyle(.secondary)
-                        }
-                    } else if installJob.status == "failed" {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Setup failed")
-                                .font(.system(size: 10.5, weight: .semibold))
-                                .foregroundStyle(Theme.danger)
-                            if let error = installJob.error {
-                                Text(error)
-                                    .font(.system(size: 9.5, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(4)
-                            }
-                            if let hint = installJob.hint {
-                                Text(hint)
-                                    .font(.system(size: 9.5))
-                                    .foregroundStyle(.tertiary)
-                                    .lineLimit(3)
-                            }
-                        }
-                    }
-                }
-
-                Divider().opacity(0.4)
-
-                HStack(spacing: 8) {
-                    if entry.installable {
+                    if let folder = folder {
                         Button {
-                            if entry.ready {
-                                onRefresh()
-                            } else {
-                                onInstall()
-                            }
-                        } label: {
-                            Label(
-                                entry.ready ? "Re-check" : (entry.installed ? "Finish setup" : "Install"),
-                                systemImage: entry.ready ? "checkmark.circle" : "arrow.down.circle"
-                            )
-                        }
-                        .buttonStyle(AdaptiveButtonStyle(primary: !entry.ready))
-                        .disabled(installJob?.isRunning == true)
-                    }
-
-                    if let sourceURL = entry.sourceUrl, let url = URL(string: sourceURL) {
-                        Button {
-                            NSWorkspace.shared.open(url)
-                        } label: {
-                            Label("bio.rodeo", systemImage: "arrow.up.right.square")
-                        }
-                        .buttonStyle(SecondaryButtonStyle())
-                    }
-
-                    Spacer()
-
-                    if let directory = openableDirectory {
-                        Button {
-                            NSWorkspace.shared.open(URL(fileURLWithPath: directory))
+                            NSWorkspace.shared.open(folder)
                         } label: {
                             Image(systemName: "folder")
                         }
-                        .buttonStyle(SecondaryButtonStyle())
-                        .help("Open model folder")
+                        .buttonStyle(.borderless)
+                        .help("Show the model's folder in Finder")
+                    }
+                    if let source = entry.sourceUrl, let url = URL(string: source) {
+                        Link(destination: url) { Image(systemName: "arrow.up.right.square") }
+                            .help("Model page on bio.rodeo")
                     }
                 }
 
-                if !entry.installable {
-                    Text("A Dimitri runner for this model is not available yet. The catalog entry is here for comparison.")
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(.tertiary)
-                } else if let detail = status?.detail, !entry.ready {
+                if let detail = status?.detail, !entry.ready, installJob == nil {
                     Text(detail)
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(2)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
+        .motion(Motion.spring, value: installing)
+        .motion(Motion.spring, value: warm)
+        .motion(Motion.spring, value: entry.ready)
     }
 
-    private var openableDirectory: String? {
-        if let dir = entry.weightDir, FileManager.default.fileExists(atPath: dir) {
-            return dir
+    private var icon: String {
+        switch entry.modelID {
+        case "rhofold": return "waveform.path"
+        case "alphafold3-mac": return "atom"
+        default: return "circle.hexagongrid"
         }
-        if let repo = status?.paths["repo"], FileManager.default.fileExists(atPath: repo) {
-            return repo
+    }
+
+    @ViewBuilder
+    private var badge: some View {
+        if installing {
+            Chip(text: "Installing", icon: "arrow.down.circle", tint: .accentColor)
+        } else if warm {
+            Chip(text: "Loaded", icon: "bolt.fill", tint: Theme.success)
+        } else if entry.ready {
+            Chip(text: "Ready", icon: "checkmark.circle.fill", tint: Theme.success)
+        } else if entry.installed {
+            Chip(text: "Needs weights", icon: "key.fill", tint: Theme.warning)
+        } else {
+            Chip(text: "Not installed", icon: "arrow.down.circle")
         }
-        return nil
+    }
+
+    @ViewBuilder
+    private var primaryAction: some View {
+        if installing {
+            Button("Cancel Install") {
+                if let job = installJob { Task { await app.cancel(job.id) } }
+            }
+            .buttonStyle(SubtleButtonStyle())
+        } else if entry.ready {
+            Button {
+                app.draft.modelIDs = [entry.modelID]
+                if let first = entry.entityTypes.first, let kind = EntityKind(rawValue: first),
+                   !entry.entityTypes.contains(app.draft.entity.rawValue) {
+                    app.draft.entity = kind
+                }
+                withAnimation(Motion.snappy) { app.screen = .predict }
+            } label: {
+                Label("Use", systemImage: "play.fill")
+            }
+            .buttonStyle(SubtleButtonStyle(prominent: true))
+            Button {
+                Task { await app.install(entry) }
+            } label: {
+                Label("Update", systemImage: "arrow.triangle.2.circlepath")
+            }
+            .buttonStyle(SubtleButtonStyle())
+            .help("Run setup again to update the model and check its files")
+        } else {
+            Button {
+                Task { await app.install(entry) }
+            } label: {
+                Label(entry.installed ? "Finish Setup" : "Install", systemImage: "arrow.down.circle.fill")
+            }
+            .buttonStyle(PrimaryButtonStyle())
+        }
+    }
+
+    private var folder: URL? {
+        let candidates = [status?.paths["repo"], entry.weightDir].compactMap { $0 }
+        return candidates.map { URL(fileURLWithPath: $0) }.first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+}
+
+private struct InstallProgress: View {
+    @Environment(AppModel.self) private var app
+    let job: JobSummary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if job.isActive {
+                HStack {
+                    Text(job.stageMessage ?? "Starting…")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .contentTransition(.opacity)
+                    Spacer()
+                    Text("\(Int(job.progress))%")
+                        .font(.caption.monospacedDigit())
+                        .contentTransition(.numericText())
+                }
+                ProgressView(value: job.progress, total: 100)
+                    .tint(Color.accentColor)
+                    .motion(Motion.gentle, value: job.progress)
+            } else {
+                Label("Setup failed", systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(Theme.failure)
+                if let error = job.error {
+                    Text(error)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(5)
+                        .textSelection(.enabled)
+                }
+                if let hint = job.hint {
+                    Text(hint).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
+    }
+}
+
+private struct WeightsNote: View {
+    let entry: CatalogEntry
+    let note: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label {
+                Text(note).fixedSize(horizontal: false, vertical: true)
+            } icon: {
+                Image(systemName: "key.fill").foregroundStyle(Theme.warning)
+            }
+            .font(.caption)
+            if let directory = entry.weightDir {
+                HStack(spacing: 8) {
+                    Text(directory)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Button("Show Folder") {
+                        try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+                        NSWorkspace.shared.open(URL(fileURLWithPath: directory))
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                }
+            }
+            if entry.modelID == "alphafold3-mac" {
+                Link("AlphaFold 3 model parameter terms", destination: URL(string: "https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md")!)
+                    .font(.caption)
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.warning.opacity(0.08)))
+    }
+}
+
+private struct ReferenceCard: View {
+    let entry: CatalogEntry
+
+    var body: some View {
+        Card(padding: 14) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text(entry.name).font(.callout.weight(.semibold))
+                    Spacer()
+                    if let source = entry.sourceUrl, let url = URL(string: source) {
+                        Link(destination: url) { Image(systemName: "arrow.up.right.square") }
+                    }
+                }
+                Text(entry.provider ?? "")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(entry.description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+        }
     }
 }

@@ -1,500 +1,553 @@
+import AppKit
 import SwiftUI
 
 struct PredictView: View {
-    @EnvironmentObject private var app: AppModel
-    let onRun: () -> Void
-    let onNeedSetup: () -> Void
-
-    @State private var entity: EntityKind = .protein
-    @State private var selectedModelID: String = "alphafold3-mac"
-    @State private var sequence: String = ""
-    @State private var seed: Int = 42
-    @State private var samples: Int = 5
-    @State private var isSubmitting = false
-
-    private var allModels: [CatalogEntry] {
-        app.catalog
-            .filter { $0.installable }
-            .sorted { lhs, rhs in
-                let order = ["alphafold3-mac", "openfold3", "rhofold"]
-                let l = order.firstIndex(of: lhs.id) ?? 99
-                let r = order.firstIndex(of: rhs.id) ?? 99
-                return l < r
-            }
-    }
-
-    private var compatibleModels: [CatalogEntry] {
-        allModels.filter { $0.entityTypes.contains(entity.rawValue) }
-    }
-
-    private var selectedEntry: CatalogEntry? {
-        if let selected = compatibleModels.first(where: { $0.id == selectedModelID }) {
-            return selected
-        }
-        return compatibleModels.first(where: { $0.ready }) ?? compatibleModels.first
-    }
-
-    private var cleanedSequence: String {
-        let stripped = sequence.filter { !$0.isWhitespace }
-        return entity == .ligand ? stripped : stripped.uppercased()
-    }
-
-    private var validation: String? {
-        if cleanedSequence.isEmpty { return nil }
-        if cleanedSequence.count > 8_000 { return "Sequences are limited to 8,000 tokens." }
-        if let alphabet = entity.alphabet {
-            let bad = Set(cleanedSequence).subtracting(alphabet)
-            if !bad.isEmpty {
-                return "Unsupported \(entity.label) character(s): \(String(bad.sorted()))"
-            }
-        }
-        return nil
-    }
-
-    private var canRun: Bool {
-        selectedEntry?.ready == true
-            && !cleanedSequence.isEmpty
-            && validation == nil
-            && !isSubmitting
-    }
+    @Environment(AppModel.self) private var app
+    @FocusState private var editorFocused: Bool
 
     var body: some View {
+        @Bindable var app = app
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 20) {
                 header
-
-                HStack(alignment: .top, spacing: 18) {
-                    VStack(spacing: 18) {
-                        modelPicker
-                        inputCard
+                HStack(alignment: .top, spacing: 20) {
+                    VStack(spacing: 20) {
+                        SequenceCard(editorFocused: $editorFocused)
+                        ModelPicker()
                     }
-                    sidePanel
-                        .frame(width: 330)
+                    .frame(maxWidth: .infinity)
+                    RunPanel()
+                        .frame(width: 320)
                 }
             }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 22)
-            .frame(maxWidth: 1240, alignment: .center)
+            .padding(.horizontal, 28)
+            .padding(.vertical, 24)
+            .frame(maxWidth: 1260)
             .frame(maxWidth: .infinity)
         }
-        .onAppear(perform: reconcileModel)
-        .onChange(of: entity) { _, _ in reconcileModel() }
-        .onChange(of: app.catalog.count) { _, _ in reconcileModel() }
-        .onChange(of: readinessSignature) { _, _ in reconcileModel() }
+        .scrollContentBackground(.hidden)
+        .navigationTitle("Predict")
+        .navigationSubtitle(app.draft.cleanedSequence.isEmpty ? "New prediction" : "\(app.draft.cleanedSequence.count) \(app.draft.entity.unit) \(app.draft.entity.label)")
+        .toolbar {
+            ToolbarItemGroup {
+                Menu {
+                    ForEach(SequenceExample.all) { example in
+                        Button(example.title) { load(example) }
+                    }
+                } label: {
+                    Label("Examples", systemImage: "text.badge.star")
+                }
+                .help("Load a small example input")
+                Button {
+                    app.openPanel()
+                } label: {
+                    Label("Open", systemImage: "folder")
+                }
+                .help("Open a FASTA, PDB or mmCIF file (⌘O)")
+            }
+        }
+        .onAppear {
+            app.reconcileDraftModels()
+            if app.draft.sequence.isEmpty { editorFocused = true }
+        }
+        .onChange(of: app.draft.entity) { app.reconcileDraftModels() }
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text("Predict a structure")
-                .font(.system(size: 26, weight: .bold))
-            Text("Paste a sequence, pick a model, and run it on Apple Silicon.")
-                .font(.system(size: 12.5))
+        VStack(alignment: .leading, spacing: 6) {
+            Text("New prediction")
+                .font(.system(size: 28, weight: .bold))
+            Text(subtitle)
+                .font(.callout)
                 .foregroundStyle(.secondary)
         }
     }
 
-    private var modelPicker: some View {
+    private var subtitle: String {
+        let chip = app.status?.device?.chip ?? "Apple Silicon"
+        return "Paste a sequence or drop a FASTA file, choose one or more models, and run it on the \(chip) GPU. Nothing leaves this Mac."
+    }
+
+    private func load(_ example: SequenceExample) {
+        withAnimation(Motion.spring) {
+            app.draft.sequence = example.sequence
+            app.draft.entity = example.entity
+            app.draft.entityPinned = false
+            app.draft.modelsPinned = false
+            app.draft.name = example.title.components(separatedBy: " (").first ?? example.title
+        }
+        app.reconcileDraftModels()
+    }
+}
+
+// MARK: - Sequence
+
+private struct SequenceCard: View {
+    @Environment(AppModel.self) private var app
+    var editorFocused: FocusState<Bool>.Binding
+
+    var body: some View {
+        @Bindable var app = app
         Card {
             VStack(alignment: .leading, spacing: 14) {
-                CardTitle(
-                    title: "Model",
-                    subtitle: "The same input can be folded by any installed model.",
+                HStack(alignment: .firstTextBaseline) {
+                    SectionTitle(title: "Input", subtitle: "One chain per run. Drop a .fasta file anywhere in the window.", icon: "text.cursor")
+                    Spacer()
+                    if !app.draft.sequence.isEmpty {
+                        Button("Clear") {
+                            withAnimation(Motion.snappy) {
+                                app.draft.sequence = ""
+                                app.draft.name = ""
+                                app.draft.entityPinned = false
+                            }
+                        }
+                        .buttonStyle(.borderless)
+                        .transition(.opacity)
+                    }
+                }
+
+                HStack(spacing: 12) {
+                    TextField("Name (optional)", text: $app.draft.name)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 280)
+                    Spacer()
+                    EntityPicker()
+                }
+
+                editor
+
+                footer
+
+                if let problem = app.draftProblem {
+                    Label(problem, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(Theme.failure)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+        }
+        .motion(Motion.snappy, value: app.draftProblem)
+    }
+
+    private var editor: some View {
+        @Bindable var app = app
+        return ZStack(alignment: .topLeading) {
+            TextEditor(text: $app.draft.sequence)
+                .font(.system(size: 13, design: .monospaced))
+                .scrollContentBackground(.hidden)
+                .padding(8)
+                .focused(editorFocused)
+                .onChange(of: app.draft.sequence) { _, newValue in
+                    // Pasted FASTA: keep the name, drop the header line.
+                    if newValue.hasPrefix(">"), let record = FASTA.parse(newValue).first {
+                        app.draft.sequence = record.sequence
+                        if app.draft.name.isEmpty { app.draft.name = record.name }
+                    }
+                    if !app.draft.entityPinned, !newValue.isEmpty {
+                        let guess = EntityKind.guess(for: newValue)
+                        if guess != app.draft.entity {
+                            withAnimation(Motion.snappy) { app.draft.entity = guess }
+                        }
+                    }
+                }
+                .accessibilityLabel("Sequence")
+            if app.draft.sequence.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Paste a protein, RNA or DNA sequence, a SMILES string or a CCD code…")
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                    HStack(spacing: 8) {
+                        ForEach(SequenceExample.all) { example in
+                            Button {
+                                withAnimation(Motion.spring) {
+                                    app.draft.sequence = example.sequence
+                                    app.draft.entity = example.entity
+                                    app.draft.modelsPinned = false
+                                    app.draft.name = example.title.components(separatedBy: " (").first ?? example.title
+                                }
+                                app.reconcileDraftModels()
+                            } label: {
+                                Label(example.entity == .rna ? "Try the 52-nt RNA sample" : "Try Trp-cage (1L2Y)", systemImage: example.entity == .rna ? "waveform.path" : "circle.hexagongrid")
+                            }
+                            .buttonStyle(SubtleButtonStyle(prominent: true))
+                            .help(example.detail)
+                        }
+                    }
+                }
+                .padding(.horizontal, 13)
+                .padding(.vertical, 16)
+            }
+        }
+        .frame(minHeight: 150, maxHeight: 260)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(nsColor: .textBackgroundColor).opacity(0.7))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(app.draftProblem == nil ? (editorFocused.wrappedValue ? Color.accentColor.opacity(0.6) : Theme.hairline) : Theme.failure.opacity(0.6), lineWidth: editorFocused.wrappedValue ? 1.5 : 1)
+        )
+        .motion(Motion.snappy, value: editorFocused.wrappedValue)
+    }
+
+    private var footer: some View {
+        let sequence = app.draft.cleanedSequence
+        return VStack(alignment: .leading, spacing: 8) {
+            if !sequence.isEmpty, app.draft.entity != .ligand {
+                CompositionStrip(sequence: sequence, entity: app.draft.entity)
+                    .frame(height: 10)
+                    .clipShape(Capsule())
+                    .transition(.opacity)
+            }
+            HStack(spacing: 10) {
+                Text("\(sequence.count) \(app.draft.entity.unit)")
+                    .font(.callout.monospacedDigit())
+                    .contentTransition(.numericText())
+                    .foregroundStyle(.secondary)
+                if !app.draft.entityPinned, !sequence.isEmpty {
+                    Chip(text: "Detected \(app.draft.entity.label)", icon: "sparkles", tint: .accentColor)
+                        .transition(.scale(scale: 0.9).combined(with: .opacity))
+                }
+                Spacer()
+                if let alphabet = app.draft.entity.alphabet {
+                    Text(String(alphabet.sorted()))
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.tertiary)
+                        .help("Accepted letters")
+                }
+            }
+        }
+        .motion(Motion.snappy, value: sequence.isEmpty)
+    }
+}
+
+private struct EntityPicker: View {
+    @Environment(AppModel.self) private var app
+
+    var body: some View {
+        let binding = Binding<EntityKind>(
+            get: { app.draft.entity },
+            set: { value in
+                withAnimation(Motion.snappy) {
+                    app.draft.entity = value
+                    app.draft.entityPinned = true
+                }
+            }
+        )
+        Picker("Entity", selection: binding) {
+            ForEach(EntityKind.allCases) { kind in
+                Label(kind.label, systemImage: kind.symbol).tag(kind)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .frame(width: 330)
+        .help("What the sequence is. Detected automatically until you choose.")
+    }
+}
+
+/// A one-line portrait of the sequence: base identity for nucleic acids,
+/// residue class for proteins.
+private struct CompositionStrip: View {
+    let sequence: String
+    let entity: EntityKind
+
+    var body: some View {
+        Canvas { context, size in
+            let letters = Array(sequence.prefix(4000))
+            guard !letters.isEmpty else { return }
+            let width = size.width / CGFloat(letters.count)
+            for (index, letter) in letters.enumerated() {
+                let rect = CGRect(x: CGFloat(index) * width, y: 0, width: width + 0.5, height: size.height)
+                context.fill(Path(rect), with: .color(color(letter)))
+            }
+        }
+        .accessibilityLabel("Sequence composition")
+    }
+
+    private func color(_ letter: Character) -> Color {
+        if entity == .rna || entity == .dna {
+            switch letter {
+            case "A": return Color(red: 0.30, green: 0.69, blue: 0.47)
+            case "U", "T": return Color(red: 0.93, green: 0.43, blue: 0.37)
+            case "G": return Color(red: 0.98, green: 0.74, blue: 0.29)
+            case "C": return Color(red: 0.31, green: 0.55, blue: 0.93)
+            default: return .gray
+            }
+        }
+        switch letter {
+        case "A", "V", "L", "I", "M", "F", "W", "P", "G": return Color(red: 0.98, green: 0.74, blue: 0.29)  // hydrophobic
+        case "D", "E": return Color(red: 0.93, green: 0.43, blue: 0.37)  // acidic
+        case "K", "R", "H": return Color(red: 0.31, green: 0.55, blue: 0.93)  // basic
+        case "S", "T", "N", "Q", "C", "Y": return Color(red: 0.30, green: 0.69, blue: 0.47)  // polar
+        default: return .gray
+        }
+    }
+}
+
+// MARK: - Models
+
+private struct ModelPicker: View {
+    @Environment(AppModel.self) private var app
+
+    var body: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 14) {
+                SectionTitle(
+                    title: "Models",
+                    subtitle: "Pick one, or several to compare them on the same input.",
                     icon: "square.stack.3d.up"
                 )
-
-                if compatibleModels.isEmpty {
-                    Text("No model accepts \(entity.label) input yet. Open the Library to install one.")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 8)
+                if app.predictableModels.isEmpty {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Loading the model library…").foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 80)
                 } else {
-                    LazyVGrid(
-                        columns: [GridItem(.adaptive(minimum: 190), spacing: 10)],
-                        spacing: 10
-                    ) {
-                        ForEach(allModels) { entry in
-                            ModelOptionCard(
-                                entry: entry,
-                                selected: entry.id == selectedEntry?.id,
-                                compatible: entry.entityTypes.contains(entity.rawValue),
-                                status: app.statusEntry(for: entry),
-                                action: {
-                                    if entry.entityTypes.contains(entity.rawValue) {
-                                        selectedModelID = entry.id
-                                    }
-                                }
-                            )
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
+                        ForEach(app.predictableModels) { entry in
+                            ModelCard(entry: entry)
                         }
                     }
                 }
-            }
-        }
-    }
-
-    private var inputCard: some View {
-        Card {
-            VStack(alignment: .leading, spacing: 16) {
-                CardTitle(
-                    title: "Input",
-                    subtitle: "One entity per run. Complexes are on the roadmap.",
-                    icon: "text.cursor"
-                )
-
-                entityPicker
-
-                VStack(alignment: .leading, spacing: 6) {
-                    ZStack(alignment: .topLeading) {
-                        if sequence.isEmpty {
-                            Text(entity.placeholder)
-                                .font(.system(size: 12, design: .monospaced))
-                                .foregroundStyle(.tertiary)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 9)
-                                .allowsHitTesting(false)
-                        }
-                        TextEditor(text: $sequence)
-                            .font(.system(size: 12.5, design: .monospaced))
-                            .scrollContentBackground(.hidden)
-                            .padding(4)
-                            .frame(minHeight: 132)
-                    }
-                    .background(
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .fill(Color(nsColor: .textBackgroundColor).opacity(0.55))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .strokeBorder(
-                                validation == nil
-                                    ? Color.primary.opacity(0.08)
-                                    : Theme.danger.opacity(0.5),
-                                lineWidth: 1
-                            )
-                    )
-
-                    HStack {
-                        Text("\(cleanedSequence.count) \(entity == .ligand ? "character" : "residue")\(cleanedSequence.count == 1 ? "" : "s")")
-                            .font(.system(size: 10.5, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                        if entity != .ligand {
-                            Text("· \(entity.alphabet.map { String($0.sorted()) } ?? "")")
-                                .font(.system(size: 10.5, design: .monospaced))
-                                .foregroundStyle(.tertiary)
-                        }
-                        Spacer()
-                        Button("Use example") {
-                            sequence = entity.placeholder
-                        }
-                        .buttonStyle(.plain)
-                        .font(.system(size: 10.5, weight: .medium))
-                        .foregroundStyle(Theme.accent)
-                    }
-
-                    if let validation {
-                        Label(validation, systemImage: "exclamationmark.triangle.fill")
-                            .font(.system(size: 11))
-                            .foregroundStyle(Theme.danger)
-                    }
-                }
-
-                HStack(spacing: 22) {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("Seed")
-                            .font(.system(size: 10.5, weight: .semibold))
-                            .textCase(.uppercase)
-                            .foregroundStyle(.secondary)
-                        HStack(spacing: 6) {
-                            TextField("42", value: $seed, format: .number)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 82)
-                            Stepper("", value: $seed, in: 0...999_999)
-                                .labelsHidden()
-                        }
-                    }
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("Samples")
-                            .font(.system(size: 10.5, weight: .semibold))
-                            .textCase(.uppercase)
-                            .foregroundStyle(.secondary)
-                        HStack(spacing: 6) {
-                            Text("\(samples)")
-                                .font(.system(size: 12, design: .monospaced))
-                                .frame(width: 22)
-                            Stepper("", value: $samples, in: 1...20)
-                                .labelsHidden()
-                        }
-                    }
-                    Spacer()
-                }
-            }
-        }
-    }
-
-    private var entityPicker: some View {
-        HStack(spacing: 6) {
-            ForEach(EntityKind.allCases) { kind in
-                Button {
-                    entity = kind
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: kind.symbol)
-                            .font(.system(size: 11, weight: .medium))
-                        Text(kind.label)
-                            .font(.system(size: 11.5, weight: .medium))
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(entity == kind ? Theme.accent.opacity(0.16) : Color.clear)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .strokeBorder(
-                                entity == kind ? Theme.accent.opacity(0.45) : Color.primary.opacity(0.07),
-                                lineWidth: 1
-                            )
-                    )
-                    .foregroundStyle(entity == kind ? Theme.accent : .secondary)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-    }
-
-    private var sidePanel: some View {
-        VStack(spacing: 18) {
-            Card {
-                VStack(alignment: .leading, spacing: 14) {
-                    CardTitle(title: "Run", icon: "play.circle")
-
-                    VStack(alignment: .leading, spacing: 7) {
-                        KeyValueRow(
-                            label: "Model",
-                            value: selectedEntry?.name ?? "None available"
-                        )
-                        KeyValueRow(label: "Input", value: entity.label)
-                        KeyValueRow(
-                            label: "Sequence",
-                            value: "\(cleanedSequence.count)\(entity == .ligand ? "" : " aa")"
-                        )
-                        KeyValueRow(label: "Samples", value: "\(samples)")
-                    }
-
-                    if let entry = selectedEntry {
-                        if entry.ready {
-                            Label("Installed and ready", systemImage: "checkmark.seal.fill")
-                                .font(.system(size: 11))
-                                .foregroundStyle(Theme.accent)
-                        } else {
-                            Label("Setup required", systemImage: "exclamationmark.circle.fill")
-                                .font(.system(size: 11))
-                                .foregroundStyle(Theme.amber)
-                        }
-                    }
-
-                    Button {
-                        submit()
-                    } label: {
-                        HStack {
-                            if isSubmitting {
-                                ProgressView()
-                                    .controlSize(.small)
-                            } else {
-                                Image(systemName: "play.fill")
-                                    .font(.system(size: 10))
-                            }
-                            Text(isSubmitting ? "Starting…" : "Run prediction")
-                            Spacer()
-                            Text("⌘↩")
-                                .font(.system(size: 10, weight: .medium))
-                                .opacity(0.55)
-                        }
-                        .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(PrimaryButtonStyle())
-                    .disabled(!canRun)
-                    .opacity(canRun ? 1 : 0.45)
-                    .keyboardShortcut(.return, modifiers: [.command])
-
-                    if selectedEntry?.ready != true, selectedEntry != nil {
-                        Button("Set up in Library") {
-                            onNeedSetup()
-                        }
-                        .buttonStyle(SecondaryButtonStyle())
-                        .frame(maxWidth: .infinity)
-                    }
-                }
-            }
-
-            if let entry = selectedEntry {
-                Card {
-                    VStack(alignment: .leading, spacing: 11) {
-                        CardTitle(title: "About \(entry.name)", icon: "info.circle")
-                        Text(entry.description)
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-
-                        if let provider = entry.provider {
-                            KeyValueRow(label: "Provider", value: provider)
-                        }
-                        if let runtime = entry.runtime {
-                            KeyValueRow(label: "Runtime", value: runtime)
-                        }
-                        if let fallback = entry.fallback {
-                            KeyValueRow(label: "Fallback", value: fallback)
-                        }
-                        if let license = entry.license {
-                            KeyValueRow(label: "License", value: license)
-                        }
-                        if let openness = entry.openness {
-                            KeyValueRow(label: "Openness", value: "\(openness) / 100")
-                        }
-
-                        if entry.ready != true, let note = entry.weightNote {
-                            Divider().opacity(0.5)
-                            Text(note)
-                                .font(.system(size: 11))
-                                .foregroundStyle(Theme.amber)
-                                .fixedSize(horizontal: false, vertical: true)
-                            if let requestURL = entry.weightRequestUrl,
-                               let url = URL(string: requestURL) {
-                                Button {
-                                    NSWorkspace.shared.open(url)
-                                } label: {
-                                    Label("Get weights", systemImage: "arrow.up.right.square")
-                                        .font(.system(size: 11, weight: .semibold))
-                                }
-                                .buttonStyle(.plain)
-                                .foregroundStyle(Theme.accent)
-                            }
-                            if let directory = entry.weightDir {
-                                Text(directory)
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .textSelection(.enabled)
-                            }
-                        }
-
-                        if let sourceURL = entry.sourceUrl, let url = URL(string: sourceURL) {
-                            Button {
-                                NSWorkspace.shared.open(url)
-                            } label: {
-                                Label("View on bio.rodeo", systemImage: "arrow.up.right.square")
-                                    .font(.system(size: 11, weight: .medium))
-                            }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private var readinessSignature: String {
-        app.catalog.map { "\($0.id):\($0.ready)" }.joined(separator: ",")
-    }
-
-    private func reconcileModel() {
-        if let current = compatibleModels.first(where: { $0.id == selectedModelID }) {
-            if current.ready { return }
-            if let ready = compatibleModels.first(where: { $0.ready }) {
-                selectedModelID = ready.id
-            }
-            return
-        }
-        selectedModelID = compatibleModels.first(where: { $0.ready })?.id
-            ?? compatibleModels.first?.id
-            ?? selectedModelID
-    }
-
-    private func submit() {
-        guard let entry = selectedEntry, entry.ready, canRun else { return }
-        isSubmitting = true
-        Task {
-            let job = await app.submitPrediction(
-                modelID: entry.runnerId ?? entry.id,
-                entity: entity,
-                sequence: cleanedSequence,
-                seed: seed,
-                samples: samples
-            )
-            isSubmitting = false
-            if job != nil {
-                sequence = ""
-                onRun()
             }
         }
     }
 }
 
-struct ModelOptionCard: View {
+private struct ModelCard: View {
+    @Environment(AppModel.self) private var app
     let entry: CatalogEntry
-    let selected: Bool
-    let compatible: Bool
-    let status: RunnerStatus?
-    let action: () -> Void
+    @State private var hovering = false
 
-    private var statusText: String {
-        if !compatible { return "Unsupported input" }
-        if entry.ready { return "Ready" }
-        if entry.installed { return "Weights needed" }
-        return "Not installed"
-    }
-
-    private var statusColor: Color {
-        if !compatible { return .secondary }
-        if entry.ready { return Theme.accent }
-        if entry.installed { return Theme.amber }
-        return .secondary
-    }
+    private var compatible: Bool { entry.entityTypes.contains(app.draft.entity.rawValue) }
+    private var selected: Bool { app.draft.modelIDs.contains(entry.modelID) }
+    private var warm: Bool { app.isWarm(entry.modelID) }
 
     var body: some View {
-        Button(action: action) {
+        Button(action: toggle) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .top) {
-                    Text(entry.name)
-                        .font(.system(size: 12.5, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    Spacer()
-                    Image(systemName: selected ? "largecircle.fill.circle" : "circle")
-                        .font(.system(size: 12))
-                        .foregroundStyle(selected ? Theme.accent : Color.secondary.opacity(0.5))
-                }
-                Text(entry.provider ?? "Local model")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                HStack {
-                    StatusPill(text: statusText, color: statusColor, filled: true)
-                    Spacer()
-                    if entry.sizeBytes > 0 {
-                        Text(formatBytes(entry.sizeBytes))
-                            .font(.system(size: 9.5, design: .monospaced))
-                            .foregroundStyle(.tertiary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(entry.name)
+                            .font(.callout.weight(.semibold))
+                        Text(entry.provider ?? "Independent")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
+                    Spacer()
+                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 17))
+                        .foregroundStyle(selected ? AnyShapeStyle(.tint) : AnyShapeStyle(.quaternary))
+                        .contentTransition(.symbolEffect(.replace))
                 }
+                HStack(spacing: 6) {
+                    if let device = entry.device {
+                        Chip(text: device.uppercased(), icon: "cpu")
+                    }
+                    status
+                }
+                Text(inputs)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
-            .padding(11)
+            .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(selected ? Theme.accent.opacity(0.08) : Color.primary.opacity(0.035))
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(selected ? Color.accentColor.opacity(0.09) : Color.primary.opacity(hovering ? 0.05 : 0.03))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .strokeBorder(
-                        selected ? Theme.accent.opacity(0.45) : Color.primary.opacity(0.07),
-                        lineWidth: 1
-                    )
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(selected ? Color.accentColor.opacity(0.65) : Theme.hairline, lineWidth: selected ? 1.5 : 1)
             )
-            .opacity(compatible ? 1 : 0.5)
+            .scaleEffect(hovering && compatible ? 1.01 : 1)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(!compatible)
-        .help(status?.detail ?? entry.description)
+        .opacity(compatible ? 1 : 0.45)
+        .onHover { hovering = $0 }
+        .motion(Motion.snappy, value: selected)
+        .motion(Motion.snappy, value: hovering)
+        .help(compatible ? (entry.statusDetail ?? entry.description) : "\(entry.name) does not accept \(app.draft.entity.label) input")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityHint(compatible ? "Toggles this model" : "Not available for this input")
+    }
+
+    @ViewBuilder
+    private var status: some View {
+        if !compatible {
+            Chip(text: "No \(app.draft.entity.label)", tint: .secondary)
+        } else if warm {
+            Chip(text: "Loaded", icon: "bolt.fill", tint: Theme.success)
+                .transition(.scale.combined(with: .opacity))
+        } else if entry.ready {
+            Chip(text: "Ready", icon: "checkmark", tint: Theme.success)
+        } else if entry.installed {
+            Chip(text: "Needs weights", icon: "key", tint: Theme.warning)
+        } else {
+            Chip(text: "Not installed", icon: "arrow.down.circle", tint: .secondary)
+        }
+    }
+
+    private var inputs: String {
+        entry.entityTypes.compactMap { EntityKind(rawValue: $0)?.label }.joined(separator: " · ")
+    }
+
+    private func toggle() {
+        withAnimation(Motion.snappy) {
+            app.draft.modelsPinned = true
+            if selected {
+                app.draft.modelIDs.removeAll { $0 == entry.modelID }
+            } else {
+                app.draft.modelIDs.append(entry.modelID)
+                app.prewarm(entry.modelID)
+            }
+        }
+    }
+}
+
+// MARK: - Run
+
+private struct RunPanel: View {
+    @Environment(AppModel.self) private var app
+    @State private var showOptions = false
+
+    private var selectedEntries: [CatalogEntry] {
+        app.draft.modelIDs.compactMap { app.entry(for: $0) }
+    }
+
+    var body: some View {
+        @Bindable var app = app
+        VStack(spacing: 16) {
+            Card {
+                VStack(alignment: .leading, spacing: 14) {
+                    SectionTitle(title: "Run", icon: "play.circle")
+                    VStack(spacing: 8) {
+                        KeyValueRow(label: "Input", value: app.draft.cleanedSequence.isEmpty ? "—" : "\(app.draft.entity.label) · \(app.draft.cleanedSequence.count) \(app.draft.entity.unit)")
+                        KeyValueRow(label: selectedEntries.count > 1 ? "Models" : "Model", value: selectedEntries.isEmpty ? "None selected" : selectedEntries.map(\.name).joined(separator: ", "))
+                        if let device = app.status?.device {
+                            KeyValueRow(label: "Runs on", value: "\(device.chip) GPU")
+                        }
+                    }
+
+                    DisclosureGroup(isExpanded: $showOptions) {
+                        VStack(spacing: 10) {
+                            HStack {
+                                Text("Seed").foregroundStyle(.secondary)
+                                Spacer()
+                                TextField("Seed", value: $app.draft.seed, format: .number.grouping(.never))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 90)
+                                    .multilineTextAlignment(.trailing)
+                            }
+                            HStack {
+                                Text("Samples").foregroundStyle(.secondary)
+                                Spacer()
+                                Stepper(value: $app.draft.samples, in: 1...10) {
+                                    Text("\(app.draft.samples)")
+                                        .monospacedDigit()
+                                        .contentTransition(.numericText())
+                                }
+                            }
+                            Text("Samples apply to AlphaFold 3 and OpenFold3 (diffusion models). RhoFold+ makes one structure.")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(.top, 8)
+                    } label: {
+                        Text("Options").font(.callout.weight(.medium))
+                    }
+
+                    Button {
+                        Task { await app.submit() }
+                    } label: {
+                        HStack(spacing: 8) {
+                            if app.submitting {
+                                ProgressView().controlSize(.small).tint(.white)
+                            } else {
+                                Image(systemName: "play.fill")
+                            }
+                            Text(app.submitting ? "Starting…" : (selectedEntries.count > 1 ? "Run on \(selectedEntries.count) models" : "Run prediction"))
+                            Spacer()
+                            Text("⌘↩").opacity(0.7).font(.callout)
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
+                    .disabled(!app.canSubmit)
+                    .keyboardShortcut(.return, modifiers: .command)
+
+                    readiness
+                }
+            }
+            if let entry = selectedEntries.first {
+                AboutModelCard(entry: entry)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .id(entry.id)
+            }
+        }
+        .motion(Motion.spring, value: selectedEntries.map(\.id))
+    }
+
+    @ViewBuilder
+    private var readiness: some View {
+        let notReady = selectedEntries.filter { !$0.ready }
+        if !notReady.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(notReady) { entry in
+                    Label(entry.installed ? "\(entry.name) needs its weights" : "\(entry.name) is not installed yet", systemImage: "exclamationmark.circle.fill")
+                        .font(.callout)
+                        .foregroundStyle(Theme.warning)
+                }
+                Button("Set up in Library") {
+                    withAnimation(Motion.snappy) { app.screen = .library }
+                }
+                .buttonStyle(SubtleButtonStyle(prominent: true))
+            }
+            .transition(.opacity)
+        } else if selectedEntries.contains(where: { app.isWarm($0.modelID) }) {
+            Label("Model loaded: starts at once", systemImage: "bolt.fill")
+                .font(.caption)
+                .foregroundStyle(Theme.success)
+                .transition(.opacity)
+        }
+    }
+}
+
+private struct AboutModelCard: View {
+    let entry: CatalogEntry
+
+    var body: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 10) {
+                SectionTitle(title: entry.name, subtitle: entry.provider, icon: "info.circle")
+                Text(entry.description)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let runtime = entry.runtime {
+                    KeyValueRow(label: "Runtime", value: runtime)
+                }
+                if let license = entry.license {
+                    KeyValueRow(label: "License", value: license)
+                }
+                if !entry.ready, let note = entry.weightNote {
+                    Text(note)
+                        .font(.caption)
+                        .foregroundStyle(Theme.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let source = entry.sourceUrl, let url = URL(string: source) {
+                    Link(destination: url) {
+                        Label("Model page on bio.rodeo", systemImage: "arrow.up.right.square")
+                            .font(.caption)
+                    }
+                }
+            }
+        }
     }
 }
