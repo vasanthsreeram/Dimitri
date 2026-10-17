@@ -11,7 +11,7 @@ Pulsatance project). It is a catalogue and review site, not a model-download hub
 | `GET https://bio.rodeo` | `200`, Next.js on Vercel, title “bio.rodeo - The Analyst for Bio AI” |
 | `GET https://bio.rodeo/robots.txt` | `200`; allows all; points at the sitemap |
 | `GET https://bio.rodeo/sitemap.xml` | `200`, ~554 KB, **3,347** `<loc>` URLs, including `/models/<slug>` |
-| `GET https://bio.rodeo/models` | `200`; searchable list; `?q=` filters results |
+| `GET https://bio.rodeo/models` | `200`; searchable list; `?q=` ranks closest matches |
 | `GET https://bio.rodeo/models/alphafold-3` | `200`; full model page |
 | `GET https://bio.rodeo/models/rhofold-plus` | `200`; RhoFold+ page |
 | `GET https://bio.rodeo/models/openfold3` | `200`; OpenFold3 page |
@@ -79,11 +79,13 @@ PYTHONPATH=backend backend/.venv/bin/python scripts/build_bio_rodeo_snapshot.py
   redesign.
 - **Metadata only.** bio.rodeo does not provide model weights, downloads or
   installers. Those come from each model's own project (GitHub, Hugging Face,
-  OpenFold, or DeepMind's request form for AlphaFold 3).
+  OpenFold, or DeepMind's published AlphaFold 3 parameters).
 - **Coverage is curated.** Dimitri reads a small set of slugs relevant to structure
-  prediction, not the full 3,000+ catalogue.
+  prediction, not the full ~2,600-model catalogue (2,565 model pages at review
+time).
 - **No affiliation.** bio.rodeo is used as a public reference source. Dimitri is not
   endorsed by it, and links point back to the model pages.
 - **Rate and usage.** The adapter uses a descriptive User-Agent, fetches only public
-  GET pages, pauses between requests, and caches for 24 hours. A refresh of six
-  pages is normal use, not bulk crawling.
+  GET pages, pauses between requests, and caches for 24 hours. The snapshot script
+  fetches six curated pages; a live refresh fetches the cached set or, on first
+  run, up to 24 sitemap entries. This is small-scale use, not bulk crawling.

@@ -23,6 +23,30 @@ Dimitri Studio is two processes on one Mac:
 The backend owns all state and files. The app is a client: it never shells out or
 touches model weights itself.
 
+## Runtime policy
+
+Dimitri is MacBook-only. All inference targets Apple Silicon through Metal:
+
+| Runner | Runtime | Device | Fallback | Environment |
+|---|---|---|---|---|
+| `alphafold3-mac` | MLX port of AlphaFold 3 | `mlx` | none | `~/.dimitri/models/alphafold3-mac/.venv` |
+| `rhofold` | Upstream RhoFold+ on PyTorch | `mps` | CPU, last resort | `~/.dimitri/models/rhofold/.venv` |
+| `openfold3` | OpenFold3-MLX kernels on PyTorch | `mps` | none | `~/.dimitri/models/openfold-3-mlx/.venv` |
+
+There is no CUDA code path, no llama.cpp, and no GGUF. No runner accepts a generic
+`--device cuda` option. MLX is preferred where a port exists; PyTorch MPS is the
+fallback for models without one; CPU is only used if MPS is unavailable, and the
+result's device row and note say so.
+
+The runtime is data, not hardcoded UI: `RunnerManifest` carries `runtime`, `device`
+and `fallback`, and `to_model()` exposes them through `/api/runners` and
+`/api/models`. Each completed job also records the device it actually used
+(`JobResult.device`), which Results displays. The app shows the target runtime in
+Predict and Library.
+
+DeepSeek and other LLMs are not runtimes for structure prediction and are not part
+of the inference stack. The LM Studio probe is a status check only.
+
 ## Backend
 
 ### AppState and settings
@@ -31,7 +55,7 @@ touches model weights itself.
 (or `DIMITRI_HOME`), creates the storage directories, then constructs the registry,
 job store, job manager and catalogue. Saving settings rebuilds all four, so runner
 paths change without a restart. Paths must be absolute; this is validated in
-`PUT /api/settings`.
+`PUT /api/settings`. Paths must be absolute or `~`-prefixed; both are expanded.
 
 ### Job queue
 
@@ -119,11 +143,12 @@ with no dependency.
 1. a curated local list (`catalog/models.json`) that binds a model to a runner and
    a bio.rodeo slug, and
 2. metadata read from bio.rodeo model pages (name, description, provider, license,
-   openness, citation).
+   openness).
 
-It ships a snapshot built from live requests and can refresh into an on-disk cache
-with a 24-hour TTL. There is no bio.rodeo API; the adapter parses schema.org JSON-LD
-plus two visible stat spans. Details and evidence are in
+It ships a snapshot built from live requests and can refresh into an on-disk cache.
+The cache is used while it is younger than 24 hours; the shipped snapshot is the
+fallback. There is no bio.rodeo API; the adapter parses schema.org JSON-LD plus two
+visible stat spans. Details and evidence are in
 [docs/BIO_RODEO.md](BIO_RODEO.md).
 
 ### Disk usage
