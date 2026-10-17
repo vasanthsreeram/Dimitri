@@ -388,17 +388,21 @@ final class MolStarController: NSObject, ObservableObject {
             fail("The structure viewer is missing from this build (Resources/Viewer).")
             return
         }
+        // Bundle resource URLs can be relative to the bundle; WebKit needs an
+        // absolute file URL and raises an Objective-C exception otherwise,
+        // which must never happen inside a SwiftUI update.
+        let folder = directory.absoluteURL.standardizedFileURL
         var components = URLComponents(
-            url: directory.appendingPathComponent("index.html"),
-            resolvingAgainstBaseURL: false
+            url: folder.appendingPathComponent("index.html"),
+            resolvingAgainstBaseURL: true
         )
         components?.queryItems = [URLQueryItem(name: "theme", value: theme.rawValue)]
-        guard let page = components?.url else {
+        guard let page = components?.url, page.isFileURL, folder.isFileURL else {
             fail("The structure viewer page could not be located.")
             return
         }
         state = .starting
-        pageNavigation = webView.loadFileURL(page, allowingReadAccessTo: directory)
+        pageNavigation = webView.loadFileURL(page, allowingReadAccessTo: folder)
     }
 
     private func sendLoad() {
@@ -636,17 +640,25 @@ struct MolStarView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> WKWebView {
         let controller = context.coordinator.controller
-        controller.start(theme: ViewerTheme(context.environment.colorScheme))
+        let theme = ViewerTheme(context.environment.colorScheme)
+        // The controller publishes state; never do that during a view update.
+        DispatchQueue.main.async { controller.start(theme: theme) }
         return controller.webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         let controller = context.coordinator.controller
-        if let onEvent {
-            controller.onEvent = onEvent
+        let theme = ViewerTheme(context.environment.colorScheme)
+        let structures = self.structures
+        let colorMode = self.colorMode
+        let onEvent = self.onEvent
+        DispatchQueue.main.async {
+            if let onEvent {
+                controller.onEvent = onEvent
+            }
+            controller.setTheme(theme)
+            controller.show(structures, colorMode: colorMode)
         }
-        controller.setTheme(ViewerTheme(context.environment.colorScheme))
-        controller.show(structures, colorMode: colorMode)
     }
 
     @MainActor
@@ -656,14 +668,5 @@ struct MolStarView: NSViewRepresentable {
         init(controller: MolStarController) {
             self.controller = controller
         }
-    }
-}
-
-extension MolStarView {
-    /// Transitional: the phase-1 Results call site, which passes the backend's
-    /// CIF export. New code passes `ViewerStructure` values with each model's
-    /// native text and format, and a long-lived `MolStarController`.
-    init(cif: String) {
-        self.init(structures: [ViewerStructure(id: "structure", text: cif, format: .mmcif, label: "Structure")])
     }
 }
