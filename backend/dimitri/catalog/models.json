@@ -5,7 +5,7 @@
     "runner_id": "alphafold3-mac",
     "rodeo_slug": "alphafold-3",
     "provider": "Google DeepMind",
-    "description": "All-atom structure prediction for proteins, nucleic acids and ligands on Apple Silicon.",
+    "description": "All-atom structure prediction for proteins, nucleic acids and ligands, run in MLX on Apple Silicon through mac-af3. Needs your own copy of the official weights.",
     "tags": [
       "protein",
       "RNA",
@@ -13,7 +13,8 @@
       "ligand",
       "complexes",
       "PAE",
-      "MLX"
+      "MLX",
+      "mac-af3"
     ],
     "license": "CC-BY-NC-SA 4.0 (code)"
   },
@@ -23,11 +24,12 @@
     "runner_id": "rhofold",
     "rodeo_slug": "rhofold-plus",
     "provider": "CUHK Shen Lab",
-    "description": "RNA-only 3D structure prediction with a language-model-based deep learning approach.",
+    "description": "RNA-only 3D structure prediction with a language-model-based deep learning approach, on the Apple GPU through rhofold-mac.",
     "tags": [
       "RNA",
       "pLDDT",
-      "MPS"
+      "MPS",
+      "rhofold-mac"
     ],
     "license": "Apache-2.0"
   },

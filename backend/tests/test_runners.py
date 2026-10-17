@@ -35,9 +35,16 @@ def test_af3_input_payload_for_each_entity_type() -> None:
     runner = AlphaFold3MacRunner(Settings())
     protein = runner._input_payload(request("protein", "MKTAYIAK"))
     assert protein["dialect"] == "alphafold3"
-    assert protein["version"] == 4
+    assert protein["version"] == 2
     assert protein["modelSeeds"] == [7]
-    assert protein["sequences"][0]["protein"] == {"id": "A", "sequence": "MKTAYIAK"}
+    # Empty MSAs and no templates: single-sequence mode, no data pipeline.
+    assert protein["sequences"][0]["protein"] == {
+        "id": "A",
+        "sequence": "MKTAYIAK",
+        "unpairedMsa": "",
+        "pairedMsa": "",
+        "templates": [],
+    }
 
     rna = runner._input_payload(request("rna", "GGGAAACCC"))
     assert rna["sequences"][0]["rna"]["sequence"] == "GGGAAACCC"
@@ -57,25 +64,59 @@ def test_af3_validation_rejects_bad_residues() -> None:
     runner = AlphaFold3MacRunner(Settings())
     with pytest.raises(RunnerError, match="Invalid protein"):
         runner._validate("protein", "MKT*")
+    # alphafold3-mac would silently turn these into UNK.
+    with pytest.raises(RunnerError, match="20 standard amino acids"):
+        runner._validate("protein", "MKTBZ")
     with pytest.raises(RunnerError, match="Invalid RNA"):
         runner._validate("rna", "ACGT")
     runner._validate("dna", "ACGT")
     runner._validate("ligand", "CC(=O)O")
 
 
-def test_af3_ready_requires_checkout_and_weights(tmp_path: Path) -> None:
-    repo = tmp_path / "af3"
+def test_af3_ready_requires_mac_af3_alphafold3_mac_and_weights(tmp_path: Path) -> None:
+    af3 = tmp_path / "alphafold3-mac"
+    (af3 / ".venv" / "bin").mkdir(parents=True)
+    (af3 / ".venv" / "bin" / "python").write_text("")
+    (af3 / "src" / "alphafold3_mlx").mkdir(parents=True)
+    mac_af3 = tmp_path / "mac-af3"
     weights = tmp_path / "weights"
-    (repo / ".venv" / "bin").mkdir(parents=True)
-    (repo / "run_alphafold_mlx.py").write_text("")
-    (repo / ".venv" / "bin" / "python").write_text("")
     weights.mkdir()
-    (weights / "af3.bin.zst").write_bytes(b"0" * 1_100_000)
     settings = Settings(home=str(tmp_path / "h"))
-    settings.af3_repo = str(repo)
+    settings.af3_repo = str(af3)
+    settings.mac_af3_repo = str(mac_af3)
     settings.af3_weights_dir = str(weights)
-    status = AlphaFold3MacRunner(settings).status(settings)
-    assert status.installed and status.weights_present and status.ready
+    runner = AlphaFold3MacRunner(settings)
+    status = runner.status(settings)
+    assert not status.installed and "mac-af3 is missing" in status.detail
+
+    (mac_af3 / "core" / "scripts").mkdir(parents=True)
+    (mac_af3 / "core" / "scripts" / "mac_af3_patches.py").write_text("")
+    (mac_af3 / "tracks" / "weight-streaming" / "src").mkdir(parents=True)
+    (mac_af3 / "tracks" / "weight-streaming" / "src" / "streaming.py").write_text("")
+    status = runner.status(settings)
+    assert status.installed and not status.ready
+    assert "your own AlphaFold 3 weights" in status.detail
+    assert "cannot download" in status.detail
+
+    # A wrong file is reported once its checksum is known.
+    (weights / "af3.bin.zst").write_bytes(b"0" * 100_000_001)
+    cache = Path(settings.cache_dir) / "af3-weights-check.json"
+    import json
+
+    stat = (weights / "af3.bin.zst").stat()
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps({"path": str(weights / "af3.bin.zst"), "size": stat.st_size, "mtime": stat.st_mtime, "ok": False}))
+    status = runner.status(settings)
+    assert status.weights_present and not status.ready and "SHA-256" in status.detail
+    cache.write_text(cache.read_text().replace('"ok": false', '"ok": true'))
+    assert runner.status(settings).ready
+
+
+def test_af3_diffusion_steps_follow_mac_af3_findings() -> None:
+    assert AlphaFold3MacRunner.diffusion_steps("protein") == 20
+    assert AlphaFold3MacRunner.diffusion_steps("dna") == 20
+    assert AlphaFold3MacRunner.diffusion_steps("rna") == 200
+    assert AlphaFold3MacRunner.diffusion_steps("ligand") == 200
 
 
 def make_rhofold_mac(root: Path, *, weights: bool = True) -> Path:
@@ -310,9 +351,12 @@ def test_af3_collect_outputs_reads_mlx_confidence_scores(tmp_path: Path) -> None
         '"ptm": 0.9, "iptm": 0.8, "mean_plddt": 86.0, "rank": 1}}}'
     )
     runner = AlphaFold3MacRunner(Settings())
-    result = runner._collect_outputs(out, request("protein", "MK"))
+    result = runner._collect_outputs(out, request("protein", "MK"), chains=2)
     assert result.cif_text == "data_rank1\n"
     assert result.metrics == {"plddt": 86.0, "ptm": 0.9, "iptm": 0.8}
+    # A single chain has no interface: ipTM is not reported rather than 0.
+    single = runner._collect_outputs(out, request("protein", "MK"), chains=1)
+    assert single.metrics["iptm"] is None
     assert result.per_residue_plddt == [81.0, 91.0]
     assert result.device == "mlx"
 

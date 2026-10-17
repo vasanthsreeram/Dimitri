@@ -96,6 +96,7 @@ def read_structure(text: str, fmt: str | None = None) -> gemmi.Structure:
             document = gemmi.cif.read_string(text)
             if len(document) == 0:
                 raise StructureError("the mmCIF file has no data block")
+            _repair_atom_site(document[0])
             structure = gemmi.make_structure_from_block(document[0])
         else:
             structure = gemmi.read_pdb_string(text)
@@ -113,6 +114,22 @@ def read_structure(text: str, fmt: str | None = None) -> gemmi.Structure:
     return structure
 
 
+def _repair_atom_site(block: gemmi.cif.Block) -> None:
+    """Add columns gemmi needs that minimal model CIFs leave out.
+
+    alphafold3-mac writes ``_atom_site`` without ``label_alt_id``; gemmi then
+    reads no models at all. A '.' (no alternate location) is what it means.
+    """
+    column = block.find_loop("_atom_site.id")
+    if not column:
+        return
+    loop = column.get_loop()
+    if loop is None:
+        return
+    if "_atom_site.label_alt_id" not in list(loop.tags):
+        loop.add_columns(["_atom_site.label_alt_id"], ".")
+
+
 def _normalize_format(fmt: str) -> StructureFormat:
     value = fmt.lower().lstrip(".")
     if value in ("cif", "mmcif", "pdbx"):
@@ -123,43 +140,45 @@ def _normalize_format(fmt: str) -> StructureFormat:
 
 
 def _tidy_generated_ids(structure: gemmi.Structure) -> None:
-    """Replace gemmi's generated subchain names ("Axp", "Ax1") and letter
-    entity ids with conventional ones ("A", "1").
+    """Conventional ids for what gemmi had to invent.
 
-    Only applies when every subchain name was generated, which is the case for
-    PDB input; label_asym_id values from an mmCIF file are kept as they are.
+    Subchains gemmi generated for PDB input ("Axp", "Ax1") become chain-style
+    names ("A", "B"); label_asym_id values read from an mmCIF are kept.
+    Entities named after chains ("A") are numbered "1", "2", … as in the PDB.
     """
     first = structure[0]
-    order: list[tuple[str, str]] = []  # (subchain, chain name)
+    order: list[tuple[str, str]] = []  # (subchain, chain name), first appearance
+    seen: set[str] = set()
     for chain in first:
         for residue in chain:
-            if residue.subchain and (not order or order[-1][0] != residue.subchain):
-                if residue.subchain not in {name for name, _ in order}:
-                    order.append((residue.subchain, chain.name))
-    if not order or not all(name.startswith(chain + "x") for name, chain in order):
-        return
+            if residue.subchain and residue.subchain not in seen:
+                seen.add(residue.subchain)
+                order.append((residue.subchain, chain.name))
 
     mapping: dict[str, str] = {}
-    taken: set[str] = set()
-    for name, chain in order:
-        if name == f"{chain}xp" and chain not in taken:
-            mapping[name] = chain
-            taken.add(chain)
-    spare = (_label(i) for i in range(10_000))
-    for name, _ in order:
-        if name in mapping:
-            continue
-        candidate = next(spare)
-        while candidate in taken:
+    if order and all(name.startswith(chain + "x") for name, chain in order):
+        taken: set[str] = set()
+        for name, chain in order:
+            if name == f"{chain}xp" and chain not in taken:
+                mapping[name] = chain
+                taken.add(chain)
+        spare = (_label(i) for i in range(10_000))
+        for name, _ in order:
+            if name in mapping:
+                continue
             candidate = next(spare)
-        mapping[name] = candidate
-        taken.add(candidate)
+            while candidate in taken:
+                candidate = next(spare)
+            mapping[name] = candidate
+            taken.add(candidate)
 
-    entity_ids: dict[str, str] = {}
+    renumber = any(not entity.name.isdigit() for entity in structure.entities)
+    if not mapping and not renumber:
+        return
     for index, entity in enumerate(structure.entities, start=1):
-        entity_ids[entity.name] = str(index)
         entity.subchains = [mapping.get(sub, sub) for sub in entity.subchains]
-        entity.name = str(index)
+        if renumber:
+            entity.name = str(index)
     subchain_entity = {
         sub: entity.name for entity in structure.entities for sub in entity.subchains
     }
@@ -167,9 +186,7 @@ def _tidy_generated_ids(structure: gemmi.Structure) -> None:
         for chain in model:
             for residue in chain:
                 residue.subchain = mapping.get(residue.subchain, residue.subchain)
-                residue.entity_id = subchain_entity.get(
-                    residue.subchain, entity_ids.get(residue.entity_id, residue.entity_id)
-                )
+                residue.entity_id = subchain_entity.get(residue.subchain, residue.entity_id)
 
 
 def _label(index: int) -> str:
@@ -190,6 +207,46 @@ def to_mmcif(structure: gemmi.Structure) -> str:
     if "_atom_site." not in text:
         raise StructureError("CIF conversion produced no atom records")
     return text
+
+
+def normalize_mmcif(text: str) -> str:
+    """Add entity, polymer and chain records to a model's mmCIF in place.
+
+    Some model writers (alphafold3-mac among them) emit a minimal mmCIF with
+    label-only atom columns and no ``_entity``, ``_entity_poly`` or
+    ``_struct_asym``. gemmi fills those in and rewrites ``_atom_site``; every
+    other category (for example ``_ma_qa_metric_*`` confidence tables) is kept.
+    """
+    document = gemmi.cif.read_string(text)
+    block = document[0]
+    _repair_atom_site(block)
+    structure = gemmi.make_structure_from_block(block)
+    structure.remove_empty_chains()
+    if len(structure) == 0:
+        raise StructureError("the mmCIF file has no atoms gemmi can read")
+    structure.setup_entities()
+    _tidy_generated_ids(structure)
+    try:
+        structure.assign_label_seq_id(False)
+    except RuntimeError:
+        pass
+    groups = gemmi.MmcifOutputGroups(False)
+    for name in (
+        "atoms",
+        "group_pdb",
+        "entity",
+        "entity_poly",
+        "entity_poly_seq",
+        "struct_asym",
+        "chem_comp",
+        "atom_type",
+    ):
+        setattr(groups, name, True)
+    structure.update_mmcif_block(block, groups)
+    out = document.as_string()
+    if "_atom_site." not in out:
+        raise StructureError("normalised CIF lost its atom records")
+    return out
 
 
 def to_pdb(structure: gemmi.Structure) -> str:
@@ -347,14 +404,17 @@ def ensure_exports(
 ) -> tuple[str, str, StructureStats]:
     """Return a valid ``(pdb, cif, stats)`` triple from either representation.
 
-    The text a runner returned is kept byte for byte; only the missing format
-    is written with gemmi.
+    The text a runner returned is kept byte for byte, except that an mmCIF
+    without entity records gets them added (see ``normalize_mmcif``); the
+    missing format is written with gemmi.
     """
     if pdb_text is None and cif_text is None:
         raise StructureError("runner returned no structure")
     if cif_text is not None:
         try:
             structure = read_structure(cif_text, "mmcif")
+            if "_entity_poly." not in cif_text and "_entity_poly_seq." not in cif_text:
+                cif_text = normalize_mmcif(cif_text)
             if pdb_text is None:
                 pdb_text = to_pdb(structure)
         except (StructureError, RuntimeError):
