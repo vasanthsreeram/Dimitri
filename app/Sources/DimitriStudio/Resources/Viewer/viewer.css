@@ -1,0 +1,38 @@
+/* Dimitri Studio viewer page. Mol* fills the window and its own chrome is
+   hidden; the app draws its controls, legend and errors natively. */
+
+:root {
+  --viewer-background: #0d1117;
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --viewer-background: #ffffff;
+  color-scheme: light;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--viewer-background);
+}
+
+#app {
+  position: absolute;
+  inset: 0;
+}
+
+/* molstar.css is Mol*'s light skin: drop its frame and keep its viewport
+   from flashing light before the first frame is drawn. */
+.msp-plugin,
+.msp-plugin .msp-viewport {
+  background: var(--viewer-background);
+}
+
+.msp-plugin .msp-layout-standard {
+  border: none;
+}

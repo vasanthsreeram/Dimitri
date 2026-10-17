@@ -7,7 +7,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "DimitriStudio",
-            path: "Sources/DimitriStudio"
+            path: "Sources/DimitriStudio",
+            // The Mol* structure viewer page (Mol* 5.12.0 bundle, MIT), copied
+            // as a folder so its files keep their relative paths.
+            resources: [.copy("Resources/Viewer")]
         )
     ]
 )
