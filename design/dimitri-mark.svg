@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="536" height="536" viewBox="-46 0 536 536">
+  <title>Dimitri Studio</title>
+  <!--
+    Dimitri Studio mark: one chain folded into a "D", coloured by AlphaFold
+    pLDDT confidence. Same geometry as the app icon and LogoMark.swift; the
+    D occupies x 0-456, y 0-536 and the viewBox centres it with the icon's
+    6-unit optical shift.
+
+    The default colours are the pLDDT palette deepened just enough to hold up
+    on white as well as on dark backgrounds. Add class="dark" to the <svg>
+    element for the exact palette, as the app icon uses, when the background
+    is known to be dark (scripts/svg2png.swift has a class option for this).
+  -->
+  <style>
+    .dark .f1 { stop-color: #075CD8 }
+    .dark .f2 { stop-color: #1A72DE }
+    .dark .f3 { stop-color: #338FE5 }
+    .dark .f4 { stop-color: #4BACEB }
+    .dark .f5 { stop-color: #5EC2F1 }
+    .dark .f6 { stop-color: #65CBF3 }
+    .dark .t0 { stop-color: #FFDB13 }
+    .dark .t1 { stop-color: #FF7D45 }
+  </style>
+  <defs>
+    <radialGradient id="fold" gradientUnits="userSpaceOnUse" cx="48" cy="414" r="300">
+      <stop offset="0.18" stop-color="#0053D6"/>
+      <stop class="f1" offset="0.32" stop-color="#0357D7"/>
+      <stop class="f2" offset="0.45" stop-color="#0C63D9"/>
+      <stop class="f3" offset="0.59" stop-color="#1871DD"/>
+      <stop class="f4" offset="0.73" stop-color="#237FE0"/>
+      <stop class="f5" offset="0.86" stop-color="#2C8BE2"/>
+      <stop class="f6" offset="1" stop-color="#2F8FE3"/>
+    </radialGradient>
+    <linearGradient id="tail" gradientUnits="userSpaceOnUse" x1="393.3" y1="0" x2="94" y2="0">
+      <stop class="t0" offset="0" stop-color="#F2B600"/>
+      <stop class="t0" offset="0.2" stop-color="#F2B600"/>
+      <stop class="t1" offset="1" stop-color="#F26A2E"/>
+    </linearGradient>
+  </defs>
+  <!-- Fold: N-terminus, up the stem, round the bowl, a little past the junction. -->
+  <path d="M48 414V128A80 80 0 0 1 128 48H188A220 220 0 0 1 408 268A220 220 0 0 1 352.77 413.78"
+        fill="none" stroke="url(#fold)" stroke-width="96"/>
+  <!-- N-terminus cap. -->
+  <circle cx="48" cy="414" r="48" fill="url(#fold)"/>
+  <!-- C-terminal tail, tapering on the inside to a round tip. -->
+  <path d="M393.3 440.27A268 268 0 0 1 188 536H124A30 30 0 0 1 124 476C224.59 476 257.91 452.26 319.76 378.56Z"
+        fill="url(#tail)"/>
+</svg>

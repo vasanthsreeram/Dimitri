@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Dimitri Studio</title>
+  <!--
+    Dimitri Studio app icon. Source for every raster size: scripts/make-icons.sh.
+
+    Grid (macOS Big Sur and later): 1024 canvas, 824 x 824 body at (100, 100)
+    with continuous corners of radius 185.4. The body path is the exact outline
+    of SwiftUI's RoundedRectangle(cornerRadius: 185.4, style: .continuous).
+    The margin around the body holds the drop shadow, fitted to Apple's own
+    icons: 9 px down, 16 px blur, 22 % black.
+
+    Mark: one chain folded into a "D", coloured like an AlphaFold pLDDT plot.
+    Very high (#0053D6) at the N-terminus eases into confident (#65CBF3) up
+    the stem and stays confident through the fold; the tapering C-terminal
+    tail runs low (#FFDB13) to very low (#FF7D45). It uses the same
+    456 x 536 coordinates as dimitri-mark.svg and sits at (290, 244), 6 px
+    right of centre for optical balance.
+  -->
+  <defs>
+    <path id="body" d="M383.41 100H640.59
+      C722.19 100 763 100 806.92 113.89C854.88 131.34 892.66 169.12 910.11 217.08C924 261 924 301.81 924 383.41V640.59
+      C924 722.19 924 763 910.11 806.92C892.66 854.88 854.88 892.66 806.92 910.11C763 924 722.19 924 640.59 924H383.41
+      C301.81 924 261 924 217.08 910.11C169.12 892.66 131.34 854.88 113.89 806.92C100 763 100 722.19 100 640.59V383.41
+      C100 301.81 100 261 113.89 217.08C131.34 169.12 169.12 131.34 217.08 113.89C261 100 301.81 100 383.41 100Z"/>
+    <clipPath id="body-clip">
+      <use href="#body"/>
+    </clipPath>
+
+    <!-- Body: deep ink, lit from above, with a faint rim on the top edge. -->
+    <linearGradient id="body-fill" gradientUnits="userSpaceOnUse" x1="0" y1="100" x2="0" y2="924">
+      <stop offset="0" stop-color="#1E2738"/>
+      <stop offset="1" stop-color="#0A0E16"/>
+    </linearGradient>
+    <linearGradient id="body-sheen" gradientUnits="userSpaceOnUse" x1="0" y1="100" x2="0" y2="924">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.06"/>
+      <stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="body-rim" gradientUnits="userSpaceOnUse" x1="0" y1="100" x2="0" y2="924">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.18"/>
+      <stop offset="0.3" stop-color="#FFFFFF" stop-opacity="0"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.05"/>
+    </linearGradient>
+
+    <!-- Chain colours in mark coordinates. The fold gradient is centred on
+         the N-terminus, so the colour changes along the stem (a smoothstep
+         ease, sampled at seven stops) and is confident everywhere past it;
+         the tail runs from low to very low. -->
+    <radialGradient id="fold" gradientUnits="userSpaceOnUse" cx="48" cy="414" r="300">
+      <stop offset="0.18" stop-color="#0053D6"/>
+      <stop offset="0.32" stop-color="#075CD8"/>
+      <stop offset="0.45" stop-color="#1A72DE"/>
+      <stop offset="0.59" stop-color="#338FE5"/>
+      <stop offset="0.73" stop-color="#4BACEB"/>
+      <stop offset="0.86" stop-color="#5EC2F1"/>
+      <stop offset="1" stop-color="#65CBF3"/>
+    </radialGradient>
+    <linearGradient id="tail" gradientUnits="userSpaceOnUse" x1="393.3" y1="0" x2="94" y2="0">
+      <stop offset="0" stop-color="#FFDB13"/>
+      <stop offset="0.2" stop-color="#FFDB13"/>
+      <stop offset="1" stop-color="#FF7D45"/>
+    </linearGradient>
+
+    <filter id="body-shadow" filterUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024"
+            color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="16"/>
+      <feOffset dy="9" result="blur"/>
+      <feFlood flood-color="#000000" flood-opacity="0.22"/>
+      <feComposite in2="blur" operator="in"/>
+      <feMerge>
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="mark-shadow" x="-20%" y="-20%" width="140%" height="150%"
+            color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="16"/>
+      <feOffset dy="16" result="blur"/>
+      <feFlood flood-color="#000000" flood-opacity="0.5"/>
+      <feComposite in2="blur" operator="in"/>
+      <feMerge>
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <use href="#body" fill="url(#body-fill)" filter="url(#body-shadow)"/>
+
+  <g clip-path="url(#body-clip)">
+    <rect x="100" y="100" width="824" height="824" fill="url(#body-sheen)"/>
+
+    <g transform="translate(290 244)" filter="url(#mark-shadow)">
+      <!-- Fold: N-terminus, up the stem, round the bowl, a little past the
+           junction so the tail covers the seam. -->
+      <path d="M48 414V128A80 80 0 0 1 128 48H188A220 220 0 0 1 408 268A220 220 0 0 1 352.77 413.78"
+            fill="none" stroke="url(#fold)" stroke-width="96"/>
+      <!-- N-terminus cap. -->
+      <circle cx="48" cy="414" r="48" fill="url(#fold)"/>
+      <!-- C-terminal tail: outer edge stays on the D, inner edge tapers from
+           96 to a 60-wide round tip. -->
+      <path d="M393.3 440.27A268 268 0 0 1 188 536H124A30 30 0 0 1 124 476C224.59 476 257.91 452.26 319.76 378.56Z"
+            fill="url(#tail)"/>
+    </g>
+  </g>
+
+  <use href="#body" fill="none" stroke="url(#body-rim)" stroke-width="4" clip-path="url(#body-clip)"/>
+</svg>
