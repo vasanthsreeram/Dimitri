@@ -143,11 +143,15 @@ private extension Color {
     }
 }
 
-#Preview {
-    HStack(spacing: 24) {
-        ForEach([16, 32, 64, 128] as [CGFloat], id: \.self) { size in
-            LogoMark(size: size)
+// A PreviewProvider rather than #Preview: that macro's plugin ships only with
+// Xcode, so with just the Command Line Tools `swift build` fails on it.
+struct LogoMark_Previews: PreviewProvider {
+    static var previews: some View {
+        HStack(spacing: 24) {
+            ForEach([16, 32, 64, 128] as [CGFloat], id: \.self) { size in
+                LogoMark(size: size)
+            }
         }
+        .padding(24)
     }
-    .padding(24)
 }
